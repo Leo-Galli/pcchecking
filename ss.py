@@ -12,293 +12,360 @@ import ctypes
 import threading
 import json
 import math
-import struct
-import binascii
-import shutil
-import sqlite3
 import collections
+import shutil
+import itertools
 from concurrent.futures import ThreadPoolExecutor
 
 class ForensicConfig:
-    VERSION = "8.0.0-SENTINEL-ULTIMATE"
-    REPORT_NAME = f"FORENSIC_VERDICT_{int(time.time())}.json"
-    SCAN_ID = hashlib.sha256(str(time.time()).encode()).hexdigest()[:24].upper()
+    VERSION = "50.0.0-FORENSIC-ULTRA-DYNAMIC"
+    SCAN_ID = hashlib.sha384(str(time.time()).encode()).hexdigest()[:32].upper()
+    REPORT_NAME = f"Forensic_Intel_{SCAN_ID}.json"
+    DUMP_DIR = f"Forensic_Evidence_{SCAN_ID}"
     
-    THRESHOLD_BAN = 180
-    THRESHOLD_SUSPECT = 65
+    T_CONFIRMED = 1300
+    T_SUSPICIOUS = 750
+    T_INCONCLUSIVE = 450
     
-    TARGET_KEYWORDS = [
-        "vape", "drip", "entropy", "karma", "phantom", "itami", "raven", "koid", 
-        "astolfo", "sigma", "wurst", "liquidbounce", "meteor", "tenacity", "rise",
-        "flux", "vmulti", "intercept", "reach", "autoclicker", "velocity", 
-        "selfdestruct", "destruct", "cheat", "hack", "injector", "mapped", "manualmap",
-        "dllinject", "processhacker", "cheatengine", "x64dbg", "wireshark", "processhollowing",
-        "scylla", "dnspy", "hacker", "aimbot", "esp", "clicker", "doubleclick", "macros",
-        "razersynapse", "logitechg", "blatant", "ghostclient", "internal", "external", 
-        "overlay", "bypass", "anticheat", "cleaner", "slayer", "pixelclicker", "hitbox",
-        "knockback", "antikb", "killaura", "fastplace", "scaffold", "fly", "speed",
-        "bhop", "noslow", "autoarmor", "inventorywalk", "cheststealer", "fucker",
-        "hidhide", "vjoy", "aimassist", "backtrack", "silentaim", "fakefat", "spoofer"
-    ]
+    ENTROPY_THRESHOLD = 7.75
     
-    PATHS_TO_SCAN = [
+    KEYWORDS = list(set([
+        "vape", "v4pe", "v_ape", "drip", "dr1p", "phantom", "ph4ntom", "itami", "raven", "koid", "astolfo", "sigma", "5igma", "wurst", "liquidbounce", 
+        "tenacity", "rise", "flux", "future", "impact", "huzuni", "aristois", "metis", "rusherhack", "salhack", "novoline", "skura", "viamcp", 
+        "hypixel", "antikb", "killaura", "esp", "aimbot", "triggerbot", "hitboxes", "ch34t", "1nj3ct0r", "h4ck", "byp455", "loader", "mapper", 
+        "manualmap", "dllinject", "stub", "payload", "stealth", "ghost", "shadow", "mirror", "bypass", "kernel", "driver", "sys", "vdm", 
+        "capcom", "ghidra", "ida", "binary", "reversing", "hook", "detour", "trampoline", "shellcode", "reflect", "atom", "bomb", "thread", 
+        "hijack", "stack", "rop", "gadget", "obf", "xor", "aes", "crypt", "dropper", "stager", "beacon", "cobalt", "strike", "metasploit",
+        "amsi", "etw", "pacing", "jitter", "clancy", "murmur", "viking", "exodus", "entropy", "kdmapper", "drvmap", "processhacker", 
+        "cheatengine", "x64dbg", "scylla", "dnspy", "hidhide", "vjoy", "jnativehook", "reaper", "autoclicker", "macro", "mousekey",
+        "auto_clicker", "fastclick", "trigger_bot", "aim_assist", "silent_aim", "wallhack", "noclip", "fly", "speedhack", "teleport", 
+        "packet_editor", "wireshark", "fiddler", "charles", "burp", "proxifier", "hide_process", "stealth_inject", "kernel_cheat", 
+        "ring0", "ring3", "driver_manual_map", "service_bypass", "av_killer", "defender_control", "runas_system"
+    ]))
+
+    WHITELIST_ENTITIES = ["logitech", "lghub", "corsair", "icue", "razer", "synapse", "wireshark", "fiddler", "npcap", "pcap"]
+
+    WIN_PATHS = [
         os.path.join(os.environ.get('TEMP', 'C:\\Windows\\Temp')),
         os.path.join(os.environ.get('USERPROFILE', 'C:'), 'Downloads'),
-        os.path.join(os.environ.get('USERPROFILE', 'C:'), 'Desktop'),
-        os.path.join(os.environ.get('APPDATA', 'C:'), '.minecraft'),
         os.path.join(os.environ.get('LOCALAPPDATA', 'C:'), 'Temp'),
-        os.path.join(os.environ.get('USERPROFILE', 'C:'), 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Recent'),
-        os.path.join(os.environ.get('USERPROFILE', 'C:'), 'AppData', 'Local', 'Microsoft', 'Windows', 'History'),
-        "C:\\Windows\\Prefetch", "C:\\Windows\\debug", "C:\\ProgramData", "C:\\Windows\\System32\\drivers"
+        "C:\\Windows\\Prefetch", "C:\\Windows\\debug", "C:\\ProgramData", "C:\\Users\\Public", "C:\\Windows\\System32\\drivers"
     ]
+    LNX_PATHS = ["/tmp", "/var/tmp", "/dev/shm", "/opt", "/usr/local/bin", "/usr/bin"]
 
-    S_INFO, S_LOW, S_MED, S_HIGH, S_CRIT = "INFO", "LOW", "MED", "HIGH", "CRITICAL"
-
-class Utils:
+class AnalysisEngine:
     @staticmethod
-    def file_time_to_dt(filetime):
-        if not filetime or filetime == 0: return None
-        try:
-            if filetime > 100000000000000000:
-                return datetime.datetime(1601, 1, 1) + datetime.timedelta(microseconds=filetime // 10)
-            return datetime.datetime.fromtimestamp(filetime)
-        except: return None
-
-    @staticmethod
-    def rot13(s):
-        return s.translate(str.maketrans(
-            "ABCDEFGHIJKLMabcdefghijklmNOPQRSTUVWXYZnopqrstuvwxyz",
-            "NOPQRSTUVWXYZnopqrstuvwxyzABCDEFGHIJKLMabcdefghijklm"))
+    def get_entropy(data):
+        if not data: return 0
+        counts = collections.Counter(data)
+        entropy = 0
+        l = len(data)
+        for count in counts.values():
+            p_x = count / l
+            entropy -= p_x * math.log(p_x, 2)
+        return entropy
 
     @staticmethod
-    def get_file_entropy(path):
-        try:
-            if os.path.getsize(path) > 10 * 1024 * 1024: return 0
-            with open(path, 'rb') as f:
-                data = f.read()
-                if not data: return 0
-                occ = collections.Counter(data)
-                ent = 0
-                for count in occ.values():
-                    p_x = count / len(data)
-                    ent += - p_x * math.log(p_x, 2)
-                return ent
-        except: return 0
-
-    @staticmethod
-    def get_file_hashes(path):
+    def calculate_hash(filepath):
         sha256_hash = hashlib.sha256()
         try:
-            with open(path, "rb") as f:
-                for byte_block in iter(lambda: f.read(4096), b""):
+            if os.path.getsize(filepath) > 50 * 1024 * 1024: return None
+            with open(filepath, "rb") as f:
+                for byte_block in iter(lambda: f.read(65536), b""):
                     sha256_hash.update(byte_block)
             return sha256_hash.hexdigest()
         except: return None
 
-class UI:
-    R, G, Y, C, M, B, W = '\033[91m', '\033[92m', '\033[93m', '\033[96m', '\033[95m', '\033[1m', '\033[0m'
-    
     @staticmethod
-    def banner():
-        print(f"{UI.C}{UI.B}═"*110)
-        print(f" SENTINEL-FORENSIC v{ForensicConfig.VERSION} | HEURISTIC ANALYSIS & DECISION ENGINE")
-        print(f" SESSION_ID: {ForensicConfig.SCAN_ID}")
-        print("═"*110 + f"{UI.W}")
+    def normalize(s):
+        s = s.lower()
+        m = {'4':'a','3':'e','1':'i','0':'o','7':'t','5':'s','8':'b','_':'','-':'',' ':'','!':'i','@':'a'}
+        return "".join(m.get(c, c) for c in s)
 
-class TimelineManager:
-    def __init__(self):
-        self.events = []
-        self.entities = collections.defaultdict(list)
-        self.total_score = 0
-        self.verdict_evidences = []
-        self.lock = threading.Lock()
+    @staticmethod
+    def levenshtein(s1, s2):
+        if len(s1) < 4: return 99
+        if len(s1) < len(s2): return AnalysisEngine.levenshtein(s2, s1)
+        if len(s2) == 0: return len(s1)
+        prev_row = range(len(s2) + 1)
+        for i, c1 in enumerate(s1):
+            curr_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                insertions = prev_row[j + 1] + 1
+                deletions = curr_row[j] + 1
+                substitutions = prev_row[j] + (c1 != c2)
+                curr_row.append(min(insertions, deletions, substitutions))
+            prev_row = curr_row
+        return prev_row[-1]
 
-    def add_event(self, source, entity_name, timestamp, description, severity, weight, reliability=1):
-        with self.lock:
-            event = {
-                "source": source, "entity": entity_name, "timestamp": str(timestamp),
-                "dt_obj": timestamp if isinstance(timestamp, datetime.datetime) else None,
-                "description": description, "severity": severity, "weight": weight, "reliability": reliability
-            }
-            self.events.append(event)
-            self.entities[entity_name.lower()].append(event)
-            self.total_score += (weight * reliability)
-
-class FilesystemEngine:
-    def __init__(self, timeline):
-        self.timeline = timeline
-
-    def scan(self):
-        for base in ForensicConfig.PATHS_TO_SCAN:
-            if not os.path.exists(base): continue
-            for root, _, files in os.walk(base):
-                for f in files:
-                    fp = os.path.join(root, f)
-                    try:
-                        st = os.stat(fp)
-                        m, c, a = [datetime.datetime.fromtimestamp(x) for x in [st.st_mtime, st.st_ctime, st.st_atime]]
-                        
-                        if any(k in f.lower() for k in ForensicConfig.TARGET_KEYWORDS):
-                            ent = Utils.get_file_entropy(fp)
-                            h = Utils.get_file_hashes(fp)
-                            sev = ForensicConfig.S_CRIT if ent > 7.75 else ForensicConfig.S_HIGH
-                            self.timeline.add_event("FS_STATIC", f, m, f"Keyword match: {f} (Entropy: {ent:.2f}, Hash: {h[:16]}...)", sev, 30, 1.5)
-                        
-                        if c > m + datetime.timedelta(seconds=5):
-                            self.timeline.add_event("ANTI-FORENSIC", f, c, "Inconsistent Timestamp: Timestomping Sign (C > M)", ForensicConfig.S_HIGH, 45, 2)
-                        
-                        if abs((m-c).total_seconds()) < 0.1 and abs((m-a).total_seconds()) < 0.1:
-                             self.timeline.add_event("ANTI-FORENSIC", f, m, "Precision Timestamp Match (M=C=A): Forensic Erasure Tool Sign", ForensicConfig.S_CRIT, 50, 2)
-                             
-                    except: continue
-
-class RegistryEngine:
-    def __init__(self, timeline):
-        self.timeline = timeline
-
-    def scan(self):
+class AdaptiveOrchestrator:
+    def __init__(self, ref_time=None):
+        self.os_type = platform.system()
+        self.is_admin = self._check_privs()
+        self.timeline = []
+        self._lock = threading.Lock()
+        self._seen = set()
+        self.ref_time = ref_time if ref_time else time.time()
+        self.rename_chains = {}
+        self.score = 0
+        self.mitigations = []
+        self.correlations = []
+        self.intel = collections.defaultdict(list)
+        self.layer_counts = collections.defaultdict(int)
         
-        hives = [
-            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist", "USERASSIST"),
-            (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Services\bam\UserSettings", "BAM"),
-            (winreg.HKEY_CURRENT_USER, r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache", "MUICACHE"),
-            (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\AppCompatCache", "SHIMCACHE"),
-            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options", "IFEO")
-        ]
-        for root, path, label in hives:
-            try:
-                with winreg.OpenKey(root, path) as key:
-                    if "UserAssist" in path:
-                        for i in range(winreg.QueryInfoKey(key)[0]):
-                            sk_n = winreg.EnumKey(key, i)
-                            with winreg.OpenKey(key, f"{sk_n}\\Count") as sk:
-                                for j in range(winreg.QueryInfoKey(sk)[1]):
-                                    n, d, _ = winreg.EnumValue(sk, j)
-                                    dn = Utils.rot13(n)
-                                    if any(k in dn.lower() for k in ForensicConfig.TARGET_KEYWORDS):
-                                        ts = Utils.file_time_to_dt(struct.unpack("<Q", d[60:68])[0])
-                                        self.timeline.add_event("REG_EXEC", dn, ts, f"Execution identified in {label}", ForensicConfig.S_CRIT, 55, 2)
-                    else:
-                        try:
-                            for i in range(winreg.QueryInfoKey(key)[1]):
-                                n, v, _ = winreg.EnumValue(key, i)
-                                if any(k in str(n).lower() or k in str(v).lower() for k in ForensicConfig.TARGET_KEYWORDS):
-                                    self.timeline.add_event("REG_PERSIST", str(n), None, f"Configuration match in {label}", ForensicConfig.S_HIGH, 25, 1.2)
-                        except: pass
+        if not os.path.exists(ForensicConfig.DUMP_DIR):
+            try: os.makedirs(ForensicConfig.DUMP_DIR)
             except: pass
 
-class MemoryEngine:
-    def __init__(self, timeline):
-        self.timeline = timeline
-
-    def scan(self):
-        
-        for proc in psutil.process_iter(['pid', 'name', 'exe', 'cmdline', 'status', 'username']):
-            try:
-                p = proc.info
-                if p['exe'] and p['name'].lower() not in p['exe'].lower():
-                    self.timeline.add_event("PROC_BEHAVIOR", p['name'], None, f"Process Masquerading: Name '{p['name']}' != File '{p['exe']}'", ForensicConfig.S_CRIT, 70, 2)
-                
-                if p['username'] == 'SYSTEM' and 'Users' in str(p['exe']):
-                    self.timeline.add_event("PROC_PRIVILEGE", p['name'], None, "System-level process running from user path", ForensicConfig.S_CRIT, 80, 2)
-
-                if "java" in p['name'].lower():
-                    cmd = " ".join(p['cmdline']) if p['cmdline'] else ""
-                    if any(x in cmd.lower() for x in ["-javaagent", "-cp", "-Djava.library.path"]):
-                        if any(k in cmd.lower() for k in ForensicConfig.TARGET_KEYWORDS):
-                            self.timeline.add_event("PROC_JAVA", p['name'], None, f"Injection/Agent identified in JVM: {cmd[:60]}", ForensicConfig.S_CRIT, 90, 2)
-                
-                try:
-                    for m in proc.memory_maps():
-                        if any(k in m.path.lower() for k in ForensicConfig.TARGET_KEYWORDS):
-                             self.timeline.add_event("PROC_MEM", p['name'], None, f"Unsigned/Cheat module mapped: {m.path}", ForensicConfig.S_CRIT, 100, 2)
-                except: pass
-
-            except: continue
-
-class EventLogEngine:
-    def __init__(self, timeline):
-        self.timeline = timeline
-
-    def scan(self):
+    def _check_privs(self):
         try:
-            cmd = 'wevtutil qe Security /q:"*[System[(EventID=1102)]]" /f:text /c:1'
-            if "1102" in subprocess.check_output(cmd, shell=True).decode(errors='ignore'):
-                self.timeline.add_event("ANTI-FORENSIC", "Security Logs", None, "Critical Audit Log Clearing detected", ForensicConfig.S_CRIT, 120, 2)
+            if self.os_type == "Windows": return ctypes.windll.shell32.IsUserAnAdmin() != 0
+            return os.getuid() == 0
+        except: return False
+
+    def add_event(self, layer, entity, desc, weight, reliability, ts=None, fingerprint=None):
+        ent_lower = str(entity).lower()
+        if any(w in ent_lower for w in ForensicConfig.WHITELIST_ENTITIES):
+            weight *= 0.2
+            reliability *= 0.5
+
+        event_key = f"{layer}|{ent_lower}|{desc}"
+        with self._lock:
+            if event_key in self._seen: return
+            self._seen.add(event_key)
             
-            cmd_sys = 'wevtutil qe System /q:"*[System[(EventID=7045)]]" /f:text /c:10'
-            sys_out = subprocess.check_output(cmd_sys, shell=True).decode(errors='ignore')
-            for k in ForensicConfig.TARGET_KEYWORDS:
-                if k in sys_out.lower():
-                    self.timeline.add_event("SYSTEM_EVENT", "Kernel Service", None, f"Suspicious Service Installation: {k}", ForensicConfig.S_HIGH, 60, 1.5)
-        except: pass
-
-class DecisionEngine:
-    def __init__(self, timeline):
-        self.timeline = timeline
-
-    def evaluate(self):
-        for ent, evts in self.timeline.entities.items():
-            sources = set(e['source'] for e in evts)
-            count = len(sources)
-            if count >= 3:
-                self.timeline.total_score += 250
-                self.timeline.verdict_evidences.append(f"IRREFUTABLE PROOF: {ent.upper()} present in {count} independent sources ({', '.join(sources)})")
-            elif count >= 2:
-                self.timeline.total_score += 100
-                self.timeline.verdict_evidences.append(f"CROSS-CORRELATION: {ent.upper()} detected in {sources}")
-
-        final_score = self.timeline.total_score
-        if final_score >= ForensicConfig.THRESHOLD_BAN:
-            verdict = "DA BANNARE"
-            color = UI.R
-        elif final_score >= ForensicConfig.THRESHOLD_SUSPECT:
-            verdict = "SOSPETTO"
-            color = UI.Y
-        else:
-            verdict = "CLEAN"
-            color = UI.G
+            event_ts = ts if ts else time.time()
+            decay = math.exp(-abs(event_ts - self.ref_time) / 172800)
+            adj_weight = weight * decay
             
-        return verdict, color, final_score
-
-class CoreOrchestrator:
-    def __init__(self):
-        self.tm = TimelineManager()
+            self.layer_counts[layer] += 1
+            self.timeline.append({
+                "layer": layer, "entity": str(entity), "description": desc,
+                "weight": float(adj_weight), "reliability": float(reliability),
+                "timestamp": event_ts, "fingerprint": fingerprint
+            })
 
     def run(self):
-        UI.banner()
-        fs, reg, mem, ev = FilesystemEngine(self.tm), RegistryEngine(self.tm), MemoryEngine(self.tm), EventLogEngine(self.tm)
-        
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            ex.submit(fs.scan); ex.submit(reg.scan); ex.submit(mem.scan); ex.submit(ev.scan)
+        tasks = []
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            tasks.append(executor.submit(self._audit_processes))
+            tasks.append(executor.submit(self._audit_filesystem))
+            if self.os_type == "Windows":
+                tasks.append(executor.submit(self._win_registry_audit))
+                tasks.append(executor.submit(self._win_journal_audit))
+                tasks.append(executor.submit(self._win_antiforensic_check))
+                tasks.append(executor.submit(self._win_driver_audit))
+            elif self.os_type == "Linux":
+                tasks.append(executor.submit(self._lnx_collect_intel))
 
-        de = DecisionEngine(self.tm)
-        verdict, color, score = de.evaluate()
+        for t in tasks:
+            try: t.result()
+            except: pass
 
-        print(f"\n{UI.B}╔" + "═"*50 + "╗")
-        print(f"║ {f'FINAL VERDICT: {verdict}':^48} ║")
-        print(f"║ {f'TOTAL SCORE: {int(score)}':^48} ║")
-        print(f"╚" + "═"*50 + f"╝{UI.W}")
+        report_path = self._finalize()
+        self._open_report(report_path)
+
+    def _audit_processes(self):
         
-        if self.tm.verdict_evidences:
-            print(f"\n{UI.M}{UI.B}[!] EVIDENCE SUMMARY:{UI.W}")
-            for e in sorted(set(self.tm.verdict_evidences)):
-                print(f" {UI.R}»{UI.W} {e}")
+        for proc in psutil.process_iter(['pid', 'name', 'exe', 'ppid', 'create_time', 'cmdline', 'memory_maps']):
+            try:
+                p = proc.info
+                pname = p['name'] or "Unknown"
+                pexe = p['exe'] or ""
+                
+                h = AnalysisEngine.calculate_hash(pexe) if pexe else None
+                fp = hashlib.md5(f"{pname}{h}".encode()).hexdigest() if h else "mem_only"
+
+                if not pexe and p['pid'] > 4:
+                    self.add_event("PROCESS", pname, "Esecuzione in memoria (No EXE Path)", 500, 0.95, fingerprint=fp)
+
+                if p['memory_maps']:
+                    for m in p['memory_maps']:
+                        if 'r-x' in m.perms and not m.path:
+                            self.add_event("PROCESS", pname, "Sezione RX anonima rilevata (Possible Injection/Shellcode)", 450, 0.8, fingerprint=fp)
+
+                norm_name = AnalysisEngine.normalize(pname)
+                for kw in ForensicConfig.KEYWORDS:
+                    if kw in norm_name:
+                        self.add_event("PROCESS", pname, f"Keyword match: {kw}", 200, 0.85, fingerprint=fp)
+                    elif len(kw) >= 4 and AnalysisEngine.levenshtein(kw, norm_name) <= 1:
+                        self.add_event("PROCESS", pname, f"Fuzzy match: {kw}", 150, 0.7, fingerprint=fp)
+
+                try:
+                    parent = psutil.Process(p['ppid'])
+                    if parent.create_time() > p['create_time']:
+                        self.add_event("PROCESS", pname, "Parent/Child temporal spoofing", 350, 0.9)
+                except: pass
+
+            except (psutil.NoSuchProcess, psutil.AccessDenied): continue
+
+    def _audit_filesystem(self):
         
+        paths = ForensicConfig.WIN_PATHS if self.os_type == "Windows" else ForensicConfig.LNX_PATHS
+        for b_path in paths:
+            if not os.path.exists(b_path): continue
+            for root, _, files in os.walk(b_path):
+                for f in files:
+                    fpath = os.path.join(root, f)
+                    try:
+                        st = os.stat(fpath)
+                        h = AnalysisEngine.calculate_hash(fpath)
+                        
+                        if h:
+                            if h not in self.rename_chains: self.rename_chains[h] = set()
+                            self.rename_chains[h].add(fpath)
+                            if len(self.rename_chains[h]) > 1:
+                                self.add_event("FILESYSTEM", f, f"Rename chain: {list(self.rename_chains[h])}", 250, 0.9, fingerprint=h)
+
+                        if st.st_size > 0 and st.st_size < 10 * 1024 * 1024:
+                            with open(fpath, 'rb') as fd:
+                                data = fd.read(1024 * 128)
+                                ent = AnalysisEngine.get_entropy(data)
+                                if ent > ForensicConfig.ENTROPY_THRESHOLD:
+                                    self.add_event("FILESYSTEM", f, f"Alta entropia ({ent:.2f}): Possible Packer/Payload", 300, 0.75, fingerprint=h)
+                                
+                                fd.seek(0)
+                                head = fd.read(2)
+                                if head == b'MZ' and not f.lower().endswith(('.exe', '.dll', '.sys', '.scr')):
+                                    self.add_event("FILESYSTEM", f, "Mismatch Header MZ in estensione non eseguibile", 400, 1.0)
+
+                        if abs(st.st_atime - st.st_mtime) > 86400 * 365:
+                            self.add_event("FILESYSTEM", f, "Timestomp detect (Incoerenza MACE)", 200, 0.8)
+
+                    except: continue
+
+    def _win_journal_audit(self):
+        if not self.is_admin: return
+        try:
+            raw = subprocess.check_output("fsutil usn readjournal C: csv", shell=True, timeout=20).decode(errors='ignore')
+            for line in raw.splitlines()[-5000:]:
+                parts = line.split(',')
+                if len(parts) > 3:
+                    fname = parts[0].strip()
+                    reason = parts[3].strip()
+                    if any(kw in fname.lower() for kw in ForensicConfig.KEYWORDS):
+                        self.add_event("JOURNAL", fname, f"Attività Journal su sospetto: {reason}", 250, 0.8)
+                    if "0x80000000" in reason:
+                        self.add_event("JOURNAL", fname, "Cancellazione definitiva (No Recycle Bin)", 150, 0.7)
+        except: pass
+
+    def _win_driver_audit(self):
+        try:
+            raw = subprocess.check_output("driverquery /v /fo csv", shell=True).decode(errors='ignore')
+            for line in raw.splitlines():
+                ln = line.lower()
+                if any(kw in ln for kw in ForensicConfig.KEYWORDS):
+                    self.add_event("DRIVER", "Kernel", f"Driver sospetto: {line[:50]}", 450, 0.9)
+                if "manual" in ln and "stopped" not in ln:
+                    if not any(w in ln for w in ["microsoft", "windows"]):
+                        self.add_event("DRIVER", "Kernel", "Driver non-standard caricato manualmente", 300, 0.7)
+        except: pass
+
+    def _win_registry_audit(self):
+        
+        targets = [
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"),
+            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Services"),
+            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist")
+        ]
+        for root, path in targets:
+            try:
+                with winreg.OpenKey(root, path) as key:
+                    for i in range(winreg.QueryInfoKey(key)[1]):
+                        try:
+                            n, v, _ = winreg.EnumValue(key, i)
+                            v_str = str(v).lower()
+                            if any(kw in v_str for kw in ForensicConfig.KEYWORDS):
+                                self.add_event("REGISTRY", n, f"Persistence match: {v_str[:50]}", 200, 0.85)
+                        except: continue
+            except: pass
+
+    def _win_antiforensic_check(self):
+        try:
+            log_c = subprocess.check_output('wevtutil qe Security /q:"*[System[(EventID=1102)]]" /c:1', shell=True)
+            if log_c: self.add_event("ANTIFORENSIC", "Logs", "Wiping Log Sicurezza (1102)", 400, 1.0)
+        except: pass
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Policies\Microsoft\Windows Defender") as key:
+                if winreg.QueryValueEx(key, "DisableAntiSpyware")[0] == 1:
+                    self.add_event("ANTIFORENSIC", "Defender", "Defender disabilitato via Policy", 450, 1.0)
+        except: pass
+
+    def _lnx_collect_intel(self):
+        try:
+            with open(os.path.join(ForensicConfig.DUMP_DIR, "lnx_net.txt"), "w") as f:
+                f.write(subprocess.check_output("ss -tulpn", shell=True).decode())
+            self.mitigations.append("Dump connessioni di rete Linux salvato.")
+        except: pass
+
+    def _finalize(self):
+        fp_map = collections.defaultdict(list)
+        for e in self.timeline:
+            self.score += e['weight'] * e['reliability']
+            if e['fingerprint']: fp_map[e['fingerprint']].append(e)
+
+        for fp, evs in fp_map.items():
+            layers = {ev['layer'] for ev in evs}
+            if len(layers) >= 2:
+                bonus = 250 * len(layers)
+                self.score += bonus
+                self.correlations.append(f"Cross-Layer Correlation [{fp}]: {layers}")
+
+        self.timeline.sort(key=lambda x: x['timestamp'])
+        for i in range(len(self.timeline)):
+            cluster = [self.timeline[i]]
+            for j in range(i + 1, min(i + 15, len(self.timeline))):
+                if abs(self.timeline[j]['timestamp'] - self.timeline[i]['timestamp']) < 120:
+                    cluster.append(self.timeline[j])
+            if len(cluster) > 4:
+                bonus = 150 + (len(cluster) * 20)
+                self.score += bonus
+                self.intel["temporal_clusters"].append([c['entity'] for c in cluster])
+
+        verdict = "CLEAN"
+        if self.score >= ForensicConfig.T_CONFIRMED: verdict = "CONFIRMED"
+        elif self.score >= ForensicConfig.T_SUSPICIOUS: verdict = "SUSPICIOUS"
+        elif self.score >= ForensicConfig.T_INCONCLUSIVE: verdict = "INCONCLUSIVE"
+
+        max_s = 2500
+        conf_score = min(100, int((self.score / max_s) * 100))
+
         report = {
             "metadata": {
                 "scan_id": ForensicConfig.SCAN_ID,
-                "timestamp": str(datetime.datetime.now()),
+                "version": ForensicConfig.VERSION,
+                "score": int(self.score),
+                "confidence": conf_score,
                 "verdict": verdict,
-                "score": score
+                "os": self.os_type,
+                "admin": self.is_admin
             },
-            "summary": self.tm.verdict_evidences,
-            "timeline": self.tm.events
+            "metrics": dict(self.layer_counts),
+            "intelligence": {
+                "rename_chains": {h: list(p) for h, p in self.rename_chains.items() if len(p) > 1},
+                "temporal_clusters": self.intel["temporal_clusters"][:10]
+            },
+            "correlations": self.correlations,
+            "mitigations": self.mitigations,
+            "timeline": self.timeline
         }
-        with open(ForensicConfig.REPORT_NAME, "w", encoding="utf-8") as f:
+
+        p = os.path.abspath(ForensicConfig.REPORT_NAME)
+        with open(p, "w", encoding='utf-8') as f:
             json.dump(report, f, indent=4)
+        
+        print(f"\n[!] SCAN COMPLETATO | VERDETTO: {verdict} | SCORE: {int(self.score)}")
+        return p
+
+    def _open_report(self, path):
+        try:
+            if self.os_type == "Windows": os.startfile(path)
+            elif self.os_type == "Darwin": subprocess.call(["open", path])
+            else: subprocess.call(["xdg-open", path])
+        except: pass
 
 if __name__ == "__main__":
-    if not ctypes.windll.shell32.IsUserAnAdmin():
-        sys.exit(1)
-    CoreOrchestrator().run()
+    ref = float(sys.argv[1]) if len(sys.argv) > 1 else None
+    orch = AdaptiveOrchestrator(ref_time=ref)
+    orch.run()
