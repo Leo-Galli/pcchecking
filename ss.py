@@ -21,10 +21,9 @@ except ImportError:
     winreg = None
 
 class ForensicConfig:
-    VERSION = "60.0.0-FORENSIC-VISUAL-PRO"
+    VERSION = "70.0.0-FORENSIC-DASHBOARD-PRO"
     SCAN_ID = hashlib.sha384(str(time.time()).encode()).hexdigest()[:32].upper()
     REPORT_NAME = f"Forensic_Report_{SCAN_ID}.html"
-    DUMP_DIR = f"Forensic_Evidence_{SCAN_ID}"
     T_CONFIRMED = 1300
     T_SUSPICIOUS = 750
     T_INCONCLUSIVE = 450
@@ -105,12 +104,9 @@ class AdaptiveOrchestrator:
         self.ref_time = ref_time if ref_time else time.time()
         self.rename_chains = {}
         self.score = 0
-        self.mitigations = []
-        self.correlations = []
         self.layer_counts = collections.defaultdict(int)
-        if not os.path.exists(ForensicConfig.DUMP_DIR):
-            try: os.makedirs(ForensicConfig.DUMP_DIR)
-            except: pass
+        self.anomalies_temp = []
+        self.correlations = []
 
     def _check_privs(self):
         try:
@@ -121,24 +117,22 @@ class AdaptiveOrchestrator:
     def add_event(self, layer, entity, desc, weight, reliability, ts=None, fingerprint=None):
         ent_lower = str(entity).lower()
         if any(w in ent_lower for w in ForensicConfig.WHITELIST_ENTITIES):
-            weight *= 0.2
+            weight *= 0.1
             reliability *= 0.5
         event_key = f"{layer}|{ent_lower}|{desc}"
         with self._lock:
             if event_key in self._seen: return
             self._seen.add(event_key)
             event_ts = ts if ts else time.time()
-            decay = math.exp(-abs(event_ts - self.ref_time) / 172800)
-            adj_weight = weight * decay
             self.layer_counts[layer] += 1
             self.timeline.append({
                 "layer": layer, "entity": str(entity), "description": desc,
-                "weight": float(adj_weight), "reliability": float(reliability),
+                "weight": float(weight), "reliability": float(reliability),
                 "timestamp": event_ts, "fingerprint": fingerprint
             })
 
     def run(self):
-        print(f"[*] Esecuzione {ForensicConfig.VERSION}")
+        print(f"[*] Analisi Forense in corso (ID: {ForensicConfig.SCAN_ID})...")
         tasks = []
         with ThreadPoolExecutor(max_workers=16) as executor:
             tasks.append(executor.submit(self._audit_processes))
@@ -151,26 +145,28 @@ class AdaptiveOrchestrator:
         for t in tasks:
             try: t.result()
             except: pass
-        self._finalize_html()
+        self._generate_dashboard()
 
     def _audit_processes(self):
         
-        for proc in psutil.process_iter(['pid', 'name', 'exe', 'ppid', 'create_time']):
+        for proc in psutil.process_iter(['pid', 'name', 'exe', 'ppid', 'create_time', 'cmdline']):
             try:
                 p = proc.info
                 pname = p['name'] or "Unknown"
                 pexe = p['exe'] or ""
                 h = AnalysisEngine.calculate_hash(pexe) if pexe else None
                 fp = hashlib.md5(f"{pname}{h}".encode()).hexdigest() if h else "mem_only"
+                
                 if not pexe and p['pid'] > 4:
-                    self.add_event("PROCESS", pname, "Esecuzione solo in memoria (No EXE Path)", 500, 0.95, fingerprint=fp)
+                    self.add_event("PROCESS", pname, "Esecuzione 'Ghost': il processo non ha un file fisico su disco. Tipico di iniezioni di memoria (Process Hollowing/Reflective Loading).", 600, 0.95, fingerprint=fp)
+                
                 norm_name = AnalysisEngine.normalize(pname)
                 for kw in ForensicConfig.KEYWORDS:
                     if kw in norm_name:
-                        self.add_event("PROCESS", pname, f"Keyword match: {kw}", 200, 0.85, fingerprint=fp)
+                        self.add_event("PROCESS", pname, f"Keyword Match: '{kw}'. Nome processo associato a strumenti di cheat o hacking noti.", 300, 0.9, fingerprint=fp)
                     elif len(kw) >= 4 and AnalysisEngine.levenshtein(kw, norm_name) <= 1:
-                        self.add_event("PROCESS", pname, f"Fuzzy match: {kw}", 150, 0.7, fingerprint=fp)
-            except (psutil.NoSuchProcess, psutil.AccessDenied): continue
+                        self.add_event("PROCESS", pname, f"Fuzzy Match: '{kw}'. Il nome sembra una variazione camuffata di un software proibito.", 200, 0.75, fingerprint=fp)
+            except: continue
 
     def _audit_filesystem(self):
         
@@ -183,15 +179,22 @@ class AdaptiveOrchestrator:
                     try:
                         st = os.stat(fpath)
                         h = AnalysisEngine.calculate_hash(fpath)
+                        
                         if h:
-                            if h not in self.rename_chains: self.rename_chains[h] = set()
-                            self.rename_chains[h].add(fpath)
-                        if st.st_size > 0 and st.st_size < 5 * 1024 * 1024:
+                            if h not in self.rename_chains: self.rename_chains[h] = []
+                            if fpath not in self.rename_chains[h]: self.rename_chains[h].append(fpath)
+
+                        if abs(st.st_mtime - st.st_ctime) > 86400 * 30:
+                            self.anomalies_temp.append({
+                                "file": f, "desc": "Timestomp: Data creazione e modifica troppo distanti o incoerenti. Possibile alterazione manuale dei log temporali."
+                            })
+
+                        if 0 < st.st_size < 10 * 1024 * 1024:
                             with open(fpath, 'rb') as fd:
-                                data = fd.read(65536)
+                                data = fd.read(131072)
                                 ent = AnalysisEngine.get_entropy(data)
                                 if ent > ForensicConfig.ENTROPY_THRESHOLD:
-                                    self.add_event("FILESYSTEM", f, f"Alta Entropia: {ent:.2f} (Sospetto Packer)", 300, 0.75, fingerprint=h)
+                                    self.add_event("FILESYSTEM", f, f"Alta Entropia ({ent:.2f}): Il file è cifrato o compresso con un packer. Tecnica usata per nascondere il codice reale agli antivirus.", 350, 0.8, fingerprint=h)
                     except: continue
 
     def _win_journal_audit(self):
@@ -200,165 +203,171 @@ class AdaptiveOrchestrator:
             raw = subprocess.check_output("fsutil usn readjournal C: csv", shell=True, stderr=subprocess.DEVNULL).decode(errors='ignore')
             for line in raw.splitlines()[-1000:]:
                 parts = line.split(',')
-                if len(parts) > 3 and any(kw in parts[0].lower() for kw in ForensicConfig.KEYWORDS):
-                    self.add_event("JOURNAL", parts[0].strip(), "Traccia sospetta nel Journal USN", 250, 0.8)
+                if len(parts) > 3:
+                    fname = parts[0].strip()
+                    if any(kw in fname.lower() for kw in ForensicConfig.KEYWORDS):
+                        self.add_event("JOURNAL", fname, "Traccia Journal: Il filesystem registra attività recente legata a file con nomi sospetti, anche se cancellati.", 250, 0.85)
         except: pass
 
     def _win_driver_audit(self):
         if self.os_type != "Windows": return
         try:
-            raw = subprocess.check_output("driverquery /v /fo csv", shell=True, stderr=subprocess.DEVNULL).decode(errors='ignore')
+            raw = subprocess.check_output("driverquery /v /fo csv", shell=True).decode(errors='ignore')
             for line in raw.splitlines():
                 if any(kw in line.lower() for kw in ForensicConfig.KEYWORDS):
-                    self.add_event("DRIVER", "Kernel", f"Driver sospetto caricato: {line[:50]}", 450, 0.9)
+                    self.add_event("DRIVER", "Kernel", f"Driver Sospetto: '{line.split(',')[0]}'. I driver kernel possono bypassare le protezioni di sistema e i giochi.", 500, 0.95)
         except: pass
 
     def _win_registry_audit(self):
-        if not winreg or self.os_type != "Windows": return
-        targets = [(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run")]
-        for root, path in targets:
-            try:
-                with winreg.OpenKey(root, path) as key:
-                    for i in range(winreg.QueryInfoKey(key)[1]):
-                        n, v, _ = winreg.EnumValue(key, i)
-                        if any(kw in str(v).lower() for kw in ForensicConfig.KEYWORDS):
-                            self.add_event("REGISTRY", n, "Chiave di avvio sospetta", 200, 0.85)
-            except: pass
+        if not winreg: return
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run") as k:
+                for i in range(winreg.QueryInfoKey(k)[1]):
+                    n, v, _ = winreg.EnumValue(k, i)
+                    if any(kw in str(v).lower() for kw in ForensicConfig.KEYWORDS):
+                        self.add_event("REGISTRY", n, "Esecuzione Automatica: Il software si avvia col sistema. Comune in cheat persistenti o malware.", 300, 0.9)
+        except: pass
 
     def _win_antiforensic_check(self):
         if self.os_type != "Windows": return
         try:
-            if os.path.exists("C:\\Windows\\Prefetch") and len(os.listdir("C:\\Windows\\Prefetch")) < 5:
-                self.add_event("ANTIFORENSIC", "Prefetch", "Prefetch quasi vuoto (Wipe sospetto)", 300, 0.9)
+            log_c = subprocess.check_output('wevtutil qe Security /q:"*[System[(EventID=1102)]]" /c:1', shell=True)
+            if log_c: self.add_event("ANTIFORENSIC", "Log Eventi", "Cancellazione Log: È stato rilevato il comando di svuotamento dei log di sicurezza. Tentativo di nascondere tracce.", 450, 1.0)
         except: pass
 
-    def _finalize_html(self):
-        fp_map = collections.defaultdict(list)
+    def _generate_dashboard(self):
+        fp_data = collections.defaultdict(lambda: {"score": 0, "events": [], "name": ""})
         for e in self.timeline:
+            if e['fingerprint']:
+                fp_data[e['fingerprint']]["score"] += e['weight'] * e['reliability']
+                fp_data[e['fingerprint']]["events"].append(e)
+                fp_data[e['fingerprint']]["name"] = e['entity']
             self.score += e['weight'] * e['reliability']
-            if e['fingerprint']: fp_map[e['fingerprint']].append(e)
+
+        sorted_cheats = sorted(fp_data.items(), key=lambda x: x[1]['score'], reverse=True)
         
-        for fp, evs in fp_map.items():
-            layers = {ev['layer'] for ev in evs}
-            if len(layers) >= 2:
-                self.score += 300
-                self.correlations.append({"fp": fp, "layers": list(layers)})
-
         verdict = "CLEAN"
-        v_color = "#27ae60"
-        if self.score >= ForensicConfig.T_CONFIRMED: 
-            verdict, v_color = "CONFIRMED", "#c0392b"
-        elif self.score >= ForensicConfig.T_SUSPICIOUS: 
-            verdict, v_color = "SUSPICIOUS", "#e67e22"
-        elif self.score >= ForensicConfig.T_INCONCLUSIVE: 
-            verdict, v_color = "INCONCLUSIVE", "#f1c40f"
+        v_class = "v-green"
+        if self.score >= ForensicConfig.T_CONFIRMED: verdict, v_class = "CONFIRMED", "v-red"
+        elif self.score >= ForensicConfig.T_SUSPICIOUS: verdict, v_class = "SUSPICIOUS", "v-orange"
 
-        self.timeline.sort(key=lambda x: x['weight'], reverse=True)
-        top_10 = self.timeline[:10]
-
-        html_template = f"""
+        html_tpl = f"""
         <!DOCTYPE html>
         <html lang="it">
         <head>
             <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Forensic Report - {ForensicConfig.SCAN_ID}</title>
-            <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
             <style>
-                :root {{ --bg: #f4f7f6; --card: #ffffff; --text: #2c3e50; --primary: #3498db; }}
-                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 20px; }}
-                .container {{ max-width: 1200px; margin: auto; }}
-                .header {{ background: var(--card); padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }}
-                .verdict {{ font-size: 2em; font-weight: bold; color: {v_color}; text-transform: uppercase; }}
-                .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 20px; }}
-                .card {{ background: var(--card); padding: 20px; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }}
-                table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-                th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #eee; }}
-                .high {{ background: #ffdada; color: #c0392b; }} .medium {{ background: #fff4da; color: #e67e22; }} .low {{ background: #e8f8f5; color: #27ae60; }}
-                .tooltip {{ position: relative; cursor: help; border-bottom: 1px dotted #3498db; }}
-                .modal {{ display: none; position: fixed; z-index: 100; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); }}
-                .modal-content {{ background: #fff; margin: 10% auto; padding: 20px; width: 80%; border-radius: 12px; max-height: 70vh; overflow-y: auto; }}
+                :root {{ --red: #e74c3c; --orange: #f39c12; --green: #27ae60; --dark: #2c3e50; --light: #ecf0f1; }}
+                body {{ font-family: 'Segoe UI', system-ui, sans-serif; background: #f0f2f5; color: var(--dark); margin: 0; line-height: 1.6; }}
+                .container {{ max-width: 1200px; margin: 20px auto; padding: 0 20px; }}
+                .dashboard-header {{ background: white; padding: 30px; border-radius: 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }}
+                .verdict-badge {{ padding: 15px 40px; border-radius: 50px; font-weight: 800; font-size: 1.4em; color: white; text-transform: uppercase; }}
+                .v-red {{ background: var(--red); box-shadow: 0 4px 15px rgba(231, 76, 60, 0.4); }}
+                .v-orange {{ background: var(--orange); box-shadow: 0 4px 15px rgba(243, 156, 18, 0.4); }}
+                .v-green {{ background: var(--green); box-shadow: 0 4px 15px rgba(39, 174, 96, 0.4); }}
+                .section {{ background: white; padding: 25px; border-radius: 15px; margin-bottom: 25px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }}
+                h2 {{ border-bottom: 2px solid #eee; padding-bottom: 10px; margin-top: 0; display: flex; align-items: center; }}
+                .cheat-card {{ border-left: 5px solid var(--red); background: #fff9f9; padding: 15px; margin-bottom: 10px; border-radius: 5px; }}
+                .badge {{ padding: 4px 10px; border-radius: 4px; font-size: 0.85em; font-weight: bold; color: white; }}
+                .b-red {{ background: var(--red); }} .b-orange {{ background: var(--orange); }} .b-blue {{ background: #3498db; }}
+                table {{ width: 100%; border-collapse: collapse; }}
+                th {{ text-align: left; background: #f8f9fa; padding: 12px; border-bottom: 2px solid #dee2e6; }}
+                td {{ padding: 12px; border-bottom: 1px solid #eee; }}
+                .timeline-item {{ border-left: 3px solid #ddd; padding-left: 20px; margin-bottom: 20px; position: relative; }}
+                .timeline-item::before {{ content: ''; width: 12px; height: 12px; background: #3498db; position: absolute; left: -8px; border-radius: 50%; }}
+                .legenda {{ display: flex; gap: 20px; flex-wrap: wrap; font-size: 0.9em; }}
+                .legenda-item {{ background: #eee; padding: 10px; border-radius: 8px; flex: 1; min-width: 200px; }}
             </style>
         </head>
         <body>
             <div class="container">
-                <div class="header">
-                    <h1>Forensic Intelligence Report</h1>
-                    <div class="grid">
-                        <div><strong>SCAN ID:</strong> {ForensicConfig.SCAN_ID}</div>
-                        <div><strong>OS:</strong> {self.os_type}</div>
-                        <div><strong>TIMESTAMP:</strong> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
-                        <div><strong>SCORE:</strong> {int(self.score)}</div>
+                <div class="dashboard-header">
+                    <div>
+                        <h1 style="margin:0">Forensic Intel Dashboard</h1>
+                        <p style="color:#7f8c8d; margin:5px 0">ID Scansione: {ForensicConfig.SCAN_ID} | Ver: {ForensicConfig.VERSION}</p>
+                        <p><strong>OS:</strong> {self.os_type} | <strong>Data:</strong> {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
                     </div>
-                    <div class="verdict">Verdetto: {verdict}</div>
+                    <div class="verdict-badge {v_class}">{verdict}</div>
                 </div>
 
-                <div class="grid">
-                    <div class="card">
-                        <h3>Metriche Layer</h3>
-                        <ul>
-                            <li><strong>PROCESS:</strong> {self.layer_counts['PROCESS']} - Analisi memoria e iniezioni.</li>
-                            <li><strong>FILESYSTEM:</strong> {self.layer_counts['FILESYSTEM']} - File anomali o packer.</li>
-                            <li><strong>REGISTRY:</strong> {self.layer_counts['REGISTRY']} - Persistenza Windows.</li>
-                            <li><strong>DRIVER:</strong> {self.layer_counts['DRIVER']} - Moduli kernel.</li>
+                <div class="section">
+                    <h2 style="color:var(--red)">🚨 TOP INDICATORI DI RISCHIO (CHEAT/BYPASS)</h2>
+                    <p>Queste sono le entità che hanno accumulato il punteggio più alto durante la scansione.</p>
+                    {"".join([f'''
+                    <div class="cheat-card">
+                        <div style="display:flex; justify-content:space-between">
+                            <strong>{v['name']}</strong>
+                            <span class="badge b-red">Score: {int(v['score'])}</span>
+                        </div>
+                        <p style="margin:5px 0; font-size:0.9em"><strong>Fingerprint:</strong> {k}</p>
+                        <ul style="font-size:0.9em">
+                            {"".join([f"<li>{ev['description']}</li>" for ev in v['events']])}
                         </ul>
+                    </div>''' for k, v in sorted_cheats[:5] if v['score'] > 0])}
+                </div>
+
+                <div class="grid" style="display:grid; grid-template-columns: 1fr 1fr; gap: 25px;">
+                    <div class="section">
+                        <h2>🕒 ANOMALIE TEMPORALI</h2>
+                        <p style="font-size:0.9em; color:#666">L'alterazione dei timestamp (Timestomping) è usata per far apparire file recenti come vecchi file di sistema.</p>
+                        {"".join([f"<div style='margin-bottom:10px;'><strong>{a['file']}</strong><br><small>{a['desc']}</small></div>" for a in self.anomalies_temp])}
                     </div>
-                    <div class="card"><canvas id="layerChart"></canvas></div>
+                    <div class="section">
+                        <h2>🔗 RENAME CHAINS</h2>
+                        <p style="font-size:0.9em; color:#666">File con lo stesso contenuto (Hash) ma nomi diversi in percorsi sospetti.</p>
+                        {"".join([f"<div style='margin-bottom:10px;'><strong>Hash: {h[:12]}...</strong><br><small>{' ➔ '.join([os.path.basename(p) for p in paths])}</small></div>" for h, paths in self.rename_chains.items() if len(paths) > 1])}
+                    </div>
                 </div>
 
-                <div class="card">
-                    <h3>Top 10 Eventi Critici</h3>
-                    <table>
-                        <tr><th>Layer</th><th>Entità</th><th>Descrizione</th><th>Peso</th></tr>
-                        {"".join([f"<tr class='{'high' if e['weight']>200 else 'medium'}'><td>{e['layer']}</td><td>{e['entity']}</td><td>{e['description']}</td><td>{int(e['weight'])}</td></tr>" for e in top_10])}
-                    </table>
+                <div class="section">
+                    <h2>📘 LEGENDA E TERMINI</h2>
+                    <div class="legenda">
+                        <div class="legenda-item"><strong>Peso:</strong> Indica la gravità potenziale di un evento specifico.</div>
+                        <div class="legenda-item"><strong>Entropia:</strong> Misura il disordine dei dati. Valori > 7.7 indicano spesso file cifrati (cheat).</div>
+                        <div class="legenda-item"><strong>Fingerprint:</strong> Identificativo unico basato sul contenuto del file (Hash).</div>
+                        <div class="legenda-item"><strong>Fuzzy Match:</strong> Rilevamento di nomi che tentano di imitare software legittimi (es. "L0gitech").</div>
+                    </div>
                 </div>
 
-                <div class="card" style="margin-top:20px;">
-                    <h3>Timeline Completa</h3>
-                    <input type="text" id="searchInput" placeholder="Filtra per entità o layer..." onkeyup="filterTable()" style="width:100%; padding:10px; margin-bottom:10px;">
-                    <table id="timelineTable">
-                        <thead><tr><th>Time</th><th>Layer</th><th>Entità</th><th>Descrizione</th><th>Fingerprint</th></tr></thead>
-                        <tbody>
-                        {"".join([f"<tr><td>{datetime.datetime.fromtimestamp(e['timestamp']).strftime('%H:%M:%S')}</td><td>{e['layer']}</td><td>{e['entity']}</td><td>{e['description']}</td><td><span class='tooltip' onclick='showFP(\"{e['fingerprint']}\")'>{e['fingerprint'][:8] if e['fingerprint'] else 'N/A'}</span></td></tr>" for e in self.timeline])}
-                        </tbody>
-                    </table>
+                <div class="section">
+                    <h2>Timeline Forense Ordinata</h2>
+                    <div style="margin-bottom:20px">
+                        <button onclick="filterLayer('all')" style="padding:5px 15px">Tutti</button>
+                        <button onclick="filterLayer('PROCESS')" style="padding:5px 15px">Processi</button>
+                        <button onclick="filterLayer('FILESYSTEM')" style="padding:5px 15px">File</button>
+                    </div>
+                    <div id="timeline-container">
+                    {"".join([f'''
+                    <div class="timeline-item" data-layer="{e['layer']}">
+                        <div style="display:flex; justify-content:space-between">
+                            <strong>{e['entity']}</strong>
+                            <span class="badge {'b-red' if e['weight']>400 else 'b-orange' if e['weight']>200 else 'b-blue'}">{e['layer']}</span>
+                        </div>
+                        <p style="margin:5px 0">{e['description']}</p>
+                        <small style="color:#7f8c8d">Rilevato il: {datetime.datetime.fromtimestamp(e['timestamp']).strftime('%H:%M:%S')} | Affidabilità: {int(e['reliability']*100)}%</small>
+                    </div>''' for e in sorted(self.timeline, key=lambda x: x['timestamp'])])}
+                    </div>
+                </div>
+
+                <div class="section" style="background:var(--dark); color:white">
+                    <h2>Riassunto Finale</h2>
+                    <p>L'analisi ha concluso un verdetto di <strong>{verdict}</strong> con un punteggio totale di {int(self.score)}.</p>
+                    <p>I fattori determinanti sono stati: {", ".join(list(self.layer_counts.keys()))}. Si consiglia di ispezionare manualmente le entità nella sezione "Top Indicatori".</p>
                 </div>
             </div>
-
-            <div id="fpModal" class="modal"><div class="modal-content"><span onclick="closeModal()" style="float:right; cursor:pointer;">&times; Close</span><div id="modalBody"></div></div></div>
-
             <script>
-                const ctx = document.getElementById('layerChart').getContext('2d');
-                new Chart(ctx, {{ type: 'bar', data: {{ labels: {list(self.layer_counts.keys())}, datasets: [{{ label: 'Eventi per Layer', data: {list(self.layer_counts.values())}, backgroundColor: '#3498db' }}] }} }});
-
-                function filterTable() {{
-                    let input = document.getElementById("searchInput").value.toUpperCase();
-                    let tr = document.getElementById("timelineTable").getElementsByTagName("tr");
-                    for (let i = 1; i < tr.length; i++) {{
-                        tr[i].style.display = tr[i].innerText.toUpperCase().includes(input) ? "" : "none";
-                    }}
+                function filterLayer(layer) {{
+                    document.querySelectorAll('.timeline-item').forEach(el => {{
+                        el.style.display = (layer === 'all' || el.getAttribute('data-layer') === layer) ? 'block' : 'none';
+                    }});
                 }}
-
-                function showFP(fp) {{
-                    if(fp === 'None' || fp === 'mem_only') return;
-                    let events = {json.dumps(self.timeline)};
-                    let filtered = events.filter(e => e.fingerprint === fp);
-                    let html = "<h3>Eventi per Fingerprint: " + fp + "</h3><table>";
-                    filtered.forEach(e => {{ html += "<tr><td>" + e.layer + "</td><td>" + e.description + "</td></tr>"; }});
-                    html += "</table>";
-                    document.getElementById("modalBody").innerHTML = html;
-                    document.getElementById("fpModal").style.display = "block";
-                }}
-                function closeModal() {{ document.getElementById("fpModal").style.display = "none"; }}
             </script>
         </body>
         </html>
         """
-        p = os.path.abspath(ForensicConfig.REPORT_NAME)
-        with open(p, "w", encoding='utf-8') as f: f.write(html_template)
-        print(f"[!] Report HTML generato: {p}")
-        if self.os_type == "Windows": os.startfile(p)
+        with open(ForensicConfig.REPORT_NAME, "w", encoding='utf-8') as f: f.write(html_tpl)
+        print(f"\n[!] REPORT GENERATO: {os.path.abspath(ForensicConfig.REPORT_NAME)}")
+        if self.os_type == "Windows": os.startfile(ForensicConfig.REPORT_NAME)
 
 if __name__ == "__main__":
     orch = AdaptiveOrchestrator()
