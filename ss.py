@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
 # ====================== DISCORD ======================
-DISCORD_WEBHOOK = "https://discord.com/api/webhooks/XXXXXXXX"
+DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1464939014787436741/W_vdUtu_JZTETx0GYz4iyZoOTnMKYyH6RU6oZnGbzz5rEAQOhuKLqyzX6QlRr-oPgsxx"
 
 # ====================== LOGGING ======================
 class Log:
