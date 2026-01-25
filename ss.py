@@ -13,15 +13,15 @@ DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1464939014787436741/W_vdUtu_
 # ====================== LOGGING ======================
 class Log:
     @staticmethod
-    def phase(t): print(f"\n\033[96m[▶] {t}\033[0m")
+    def phase(t): print(f"\n\033[▶] {t}\033")
     @staticmethod
-    def ok(t): print(f"\033[92m[✓] {t}\033[0m")
+    def ok(t): print(f"\033[✓] {t}\033")
     @staticmethod
-    def warn(t): print(f"\033[93m[!] {t}\033[0m")
+    def warn(t): print(f"\033[!] {t}\033")
     @staticmethod
-    def bad(t): print(f"\033[91m[✗] {t}\033[0m")
+    def bad(t): print(f"\033[✗] {t}\033")
     @staticmethod
-    def info(t): print(f"\033[94m[i] {t}\033[0m")
+    def info(t): print(f"\033[i] {t}\033")
 
 # ====================== CONFIG ======================
 class CFG:
