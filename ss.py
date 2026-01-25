@@ -2,7 +2,7 @@ import os, platform, time, hashlib, psutil, math, collections, json, logging, su
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
-DISCORD_WEBHOOK = "PUT_WEBHOOK_HERE"
+DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1464939014787436741/W_vdUtu_JZTETx0GYz4iyZoOTnMKYyH6RU6oZnGbzz5rEAQOhuKLqyzX6QlRr-oPgsxx"
 
 # ================= CONFIG =================
 class CFG:
