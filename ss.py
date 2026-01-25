@@ -1,207 +1,251 @@
-import os, json, zipfile, psutil, winreg, tempfile, requests, hashlib
+import os, platform, time, hashlib, psutil, math, collections, json, logging, subprocess, csv, requests
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+
+# ================= DISCORD =================
+DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1464939014787436741/W_vdUtu_JZTETx0GYz4iyZoOTnMKYyH6RU6oZnGbzz5rEAQOhuKLqyzX6QlRr-oPgsxx"
 
 # ================= CONFIG =================
-DISCORD_WEBHOOK = "INSERISCI_WEBHOOK"
-USER_HTML_IMAGE = "INSERISCI_IMMAGINE"
+class CFG:
+    VERSION = "2.6.0-FORENSIC-EDR-STABLE"
+    SCAN_ID = hashlib.sha256(str(time.time()).encode()).hexdigest()[:12]
 
-SCAN_ID = hashlib.sha1(str(datetime.now()).encode()).hexdigest()[:10]
+    THREADS = 8
+    ENTROPY_HIGH = 7.6
+    SCORE_CONFIRMED = 80
+    SCORE_SUSPICIOUS = 40
 
-# ====== DATABASE CHEAT CERTI ======
-CHEAT_SOFTWARE = {
-    "liquidbounce": "Minecraft cheat client (LiquidBounce)",
-    "fdp": "Minecraft cheat client (FDP)",
-    "rise": "Minecraft cheat client (Rise)",
-    "novoline": "Minecraft cheat client (Novoline)",
-    "vape": "Minecraft ghost client (Vape)",
-    "wurst": "Minecraft hack client",
-    "impact": "Minecraft hack client",
-    "meteor": "Minecraft hack client",
-    "aristois": "Minecraft hack client",
-    "sigma": "Minecraft hack client",
-    "horion": "Minecraft Bedrock cheat",
-    "cheat engine": "Memory editor",
-    "process hacker": "Advanced process inspector",
-    "x64dbg": "Debugger",
-    "extreme injector": "DLL Injector",
-    "xenos": "DLL Injector",
-    "autoclicker": "Autoclicker software",
-    "op auto clicker": "Autoclicker",
-    "gs auto clicker": "Autoclicker"
-}
+    SAFE_EXT = {
+        ".png",".jpg",".jpeg",".gif",".txt",".json",".log",
+        ".xml",".css",".pdf",".mp3",".mp4",".ttf",".woff"
+    }
 
-LB_NAMESPACES = [
-    "net/ccbluex/liquidbounce",
-    "liquidbounce/injection",
-    "liquidbounce/utils",
-    "liquidbounce/event"
-]
+    TRUSTED_VENDORS = [
+        "microsoft","windows","intel","amd","nvidia",
+        "discord","google","mozilla","oracle","java",
+        "steam","logitech","razer","corsair"
+    ]
 
-# ================= CORE =================
-class EDRScanner:
+    MINECRAFT_PATHS = [
+        ".minecraft",
+        "minecraft launcher",
+        "tlauncher"
+    ]
+
+    CHEAT_KEYWORDS = [
+        "liquidbounce","wurst","meteor","impact","sigma",
+        "novoline","fdp","vape","rise","astolfo",
+        "autoclicker","aimassist","reach","killaura"
+    ]
+
+# ================= LOG =================
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+# ================= UTILS =================
+def entropy(data):
+    if len(data) < 2048:
+        return 0
+    c = collections.Counter(data)
+    l = len(data)
+    return -sum((v/l)*math.log(v/l,2) for v in c.values())
+
+def sha256(path):
+    try:
+        h = hashlib.sha256()
+        with open(path,"rb") as f:
+            for b in iter(lambda:f.read(65536),b""):
+                h.update(b)
+        return h.hexdigest()
+    except:
+        return None
+
+def whitelisted(path):
+    p = path.lower()
+    return any(v in p for v in CFG.TRUSTED_VENDORS)
+
+# ================= EDR CORE =================
+class EDR:
     def __init__(self):
-        self.findings = []
-        self.logs = []
+        self.system = {}
+        self.software = set()
+        self.findings = collections.defaultdict(list)
 
-    def log(self, msg):
-        self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-
-    # ---------- INSTALLED SOFTWARE ----------
-    def scan_installed(self):
-        self.log("Scan software installati")
-        paths = [
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
-        ]
-        for p in paths:
-            try:
-                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, p) as k:
-                    for i in range(winreg.QueryInfoKey(k)[0]):
-                        try:
-                            sk = winreg.OpenKey(k, winreg.EnumKey(k, i))
-                            name, _ = winreg.QueryValueEx(sk, "DisplayName")
-                            lname = name.lower()
-                            for key, desc in CHEAT_SOFTWARE.items():
-                                if key in lname:
-                                    self.findings.append({
-                                        "type": "Installed software",
-                                        "name": name,
-                                        "description": desc,
-                                        "certainty": "100%"
-                                    })
-                        except:
-                            pass
-            except:
-                pass
-
-    # ---------- PROCESSI ATTIVI ----------
-    def scan_processes(self):
-        self.log("Scan processi attivi")
-        for p in psutil.process_iter(['name', 'exe']):
-            try:
-                n = (p.info['name'] or "").lower()
-                e = (p.info['exe'] or "").lower()
-                for key, desc in CHEAT_SOFTWARE.items():
-                    if key in n or key in e:
-                        self.findings.append({
-                            "type": "Running process",
-                            "name": p.info['name'],
-                            "path": p.info['exe'],
-                            "description": desc,
-                            "certainty": "100%"
-                        })
-            except:
-                pass
-
-    # ---------- MINECRAFT MODS ----------
-    def scan_minecraft(self):
-        self.log("Scan Minecraft mods")
-        mods = os.path.join(os.environ.get("APPDATA",""), ".minecraft", "mods")
-        if not os.path.isdir(mods):
-            return
-        for f in os.listdir(mods):
-            if not f.lower().endswith(".jar"):
-                continue
-            try:
-                with zipfile.ZipFile(os.path.join(mods, f)) as z:
-                    names = [n.lower() for n in z.namelist()]
-                    for ns in LB_NAMESPACES:
-                        if any(ns in n for n in names):
-                            self.findings.append({
-                                "type": "Minecraft mod",
-                                "name": "LiquidBounce",
-                                "file": f,
-                                "description": "LiquidBounce namespace rilevato",
-                                "certainty": "100%"
-                            })
-            except:
-                pass
-
-    # ---------- REPORT ----------
-    def build_reports(self):
-        tmp = tempfile.gettempdir()
-        log_path = os.path.join(tmp, f"scan_{SCAN_ID}.log")
-        json_path = os.path.join(tmp, f"scan_{SCAN_ID}.json")
-        html_path = os.path.join(tmp, f"scan_{SCAN_ID}.html")
-        user_html = os.path.join(tmp, f"user_{SCAN_ID}.html")
-
-        open(log_path, "w", encoding="utf-8").write(
-            "\n".join(self.logs) + "\n\n" + json.dumps(self.findings, indent=2)
-        )
-        open(json_path, "w", encoding="utf-8").write(
-            json.dumps(self.findings, indent=2)
-        )
-
-        # DASHBOARD STAFF
-        html = f"""
-        <html>
-        <head>
-        <style>
-        body {{ background:#0d1117;color:#c9d1d9;font-family:Segoe UI;padding:30px }}
-        .card {{ background:#161b22;padding:20px;margin:15px;border-radius:10px }}
-        .red {{ border-left:6px solid #f85149 }}
-        </style>
-        </head>
-        <body>
-        <h1>EDR Forensic Dashboard</h1>
-        <p>Scan ID: {SCAN_ID}</p>
-        """
-
-        for f in self.findings:
-            html += f"""
-            <div class="card red">
-            <b>{f['name']}</b><br>
-            Tipo: {f['type']}<br>
-            Descrizione: {f['description']}<br>
-            Certezza: {f['certainty']}
-            </div>
-            """
-
-        html += "</body></html>"
-        open(html_path, "w", encoding="utf-8").write(html)
-
-        # HTML UTENTE
-        open(user_html, "w", encoding="utf-8").write(f"""
-        <html>
-        <body style="background:#0b0b0b;color:white;text-align:center;font-family:Segoe UI">
-        <img src="{USER_HTML_IMAGE}" style="width:90%;margin-top:20px">
-        <h1>Grazie per la pazienza</h1>
-        <p>Il controllo è stato completato.<br>
-        L’esito è ora in visualizzazione dello staff.</p>
-        </body>
-        </html>
-        """)
-
-        return log_path, json_path, html_path, user_html
-
-    # ---------- DISCORD ----------
-    def send_discord(self, files):
-        if not self.findings:
-            return
-        embeds = []
-        for f in self.findings:
-            embeds.append({
-                "title": f["name"],
-                "description": f"{f['description']}\nCertezza: {f['certainty']}",
-                "color": 16711680
-            })
-
-        requests.post(DISCORD_WEBHOOK, json={
-            "content": "@everyone **SCAN COMPLETATA – CHEAT CERTI RILEVATI**",
-            "embeds": embeds[:10]
+    def add(self, path, category, score, reason):
+        self.findings[path].append({
+            "category": category,
+            "score": score,
+            "reason": reason
         })
 
-        for f in files[:-1]:
-            requests.post(DISCORD_WEBHOOK, files={"file": open(f, "rb")})
+    # ---------- SYSTEM ----------
+    def system_info(self):
+        self.system = {
+            "os": platform.platform(),
+            "cpu": platform.processor(),
+            "ram_gb": round(psutil.virtual_memory().total/1024**3,2),
+            "boot_time": datetime.fromtimestamp(psutil.boot_time()).isoformat()
+        }
+
+    # ---------- INSTALLED SOFTWARE ----------
+    def installed_software(self):
+        try:
+            import winreg
+            keys = [
+                r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
+                r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+            ]
+            for root in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:
+                for path in keys:
+                    try:
+                        with winreg.OpenKey(root,path) as k:
+                            for i in range(winreg.QueryInfoKey(k)[0]):
+                                sk = winreg.OpenKey(k, winreg.EnumKey(k,i))
+                                try:
+                                    name,_ = winreg.QueryValueEx(sk,"DisplayName")
+                                    self.software.add(name)
+                                except: pass
+                    except: pass
+        except: pass
+
+    # ---------- PROCESS SCAN ----------
+    def process_scan(self):
+        for p in psutil.process_iter(["name","exe","cmdline"]):
+            try:
+                exe = p.info["exe"]
+                name = (p.info["name"] or "").lower()
+                cmd = " ".join(p.info["cmdline"] or []).lower()
+
+                if not exe or not os.path.exists(exe):
+                    continue
+
+                if "java" in name:
+                    for kw in CFG.CHEAT_KEYWORDS:
+                        if kw in cmd:
+                            self.add(
+                                exe,
+                                "JAVA_PROCESS",
+                                60,
+                                f"Java process references cheat keyword: {kw}"
+                            )
+            except:
+                pass
+
+    # ---------- FILESYSTEM ----------
+    def filesystem(self):
+        roots = [
+            os.environ.get("APPDATA"),
+            os.environ.get("LOCALAPPDATA")
+        ]
+
+        for r in roots:
+            if not r: continue
+            for root,_,files in os.walk(r):
+                if whitelisted(root):
+                    continue
+
+                for f in files[:400]:
+                    p = os.path.join(root,f)
+                    ext = os.path.splitext(p)[1].lower()
+                    name = f.lower()
+
+                    if ext in CFG.SAFE_EXT:
+                        continue
+
+                    for kw in CFG.CHEAT_KEYWORDS:
+                        if kw in name:
+                            self.add(
+                                p,
+                                "FILENAME",
+                                45,
+                                f"Cheat keyword in filename: {kw}"
+                            )
+
+                    if ext in {".exe",".jar"}:
+                        try:
+                            with open(p,"rb") as fd:
+                                e = entropy(fd.read(65536))
+                            if e > CFG.ENTROPY_HIGH and not whitelisted(p):
+                                self.add(
+                                    p,
+                                    "ENTROPY",
+                                    35,
+                                    f"High entropy binary ({round(e,2)})"
+                                )
+                        except:
+                            pass
+
+                    for mc in CFG.MINECRAFT_PATHS:
+                        if mc in p.lower() and ext == ".jar":
+                            self.add(
+                                p,
+                                "MINECRAFT_MOD",
+                                40,
+                                "Jar inside Minecraft directory"
+                            )
+
+    # ---------- CORRELATION ----------
+    def correlate(self):
+        results = []
+        for path, ev in self.findings.items():
+            score = sum(e["score"] for e in ev)
+            level = (
+                "CONFIRMED" if score >= CFG.SCORE_CONFIRMED else
+                "SUSPICIOUS" if score >= CFG.SCORE_SUSPICIOUS else
+                "INFO"
+            )
+            results.append({
+                "path": path,
+                "level": level,
+                "score": score,
+                "evidence": ev
+            })
+        return sorted(results, key=lambda x:x["score"], reverse=True)
+
+    # ---------- DISCORD ----------
+    def send_discord(self, report):
+        confirmed = [r for r in report if r["level"]=="CONFIRMED"]
+        suspicious = [r for r in report if r["level"]=="SUSPICIOUS"]
+
+        embed = {
+            "title": "EDR Forensic Scan Completed",
+            "description": f"Scan ID `{CFG.SCAN_ID}`",
+            "color": 15158332 if confirmed else 3066993,
+            "fields": [
+                {"name":"Confirmed","value":len(confirmed),"inline":True},
+                {"name":"Suspicious","value":len(suspicious),"inline":True},
+                {"name":"Installed software","value":len(self.software),"inline":True}
+            ],
+            "footer":{"text":CFG.VERSION}
+        }
+
+        requests.post(DISCORD_WEBHOOK, json={"embeds":[embed]})
+
+        requests.post(
+            DISCORD_WEBHOOK,
+            files={
+                "file":(
+                    f"EDR_{CFG.SCAN_ID}.json",
+                    json.dumps({
+                        "system": self.system,
+                        "software": sorted(self.software),
+                        "results": report
+                    }, indent=2)
+                )
+            }
+        )
 
     # ---------- RUN ----------
     def run(self):
-        self.scan_installed()
-        self.scan_processes()
-        self.scan_minecraft()
-        files = self.build_reports()
-        self.send_discord(files)
-        os.startfile(files[-1])
+        logging.info("[*] EDR scan started")
+        self.system_info()
+        self.installed_software()
+        self.process_scan()
+        self.filesystem()
+        report = self.correlate()
+        self.send_discord(report)
+        logging.info("[+] Scan completed")
 
-# ================= START =================
-EDRScanner().run()
+# ================= RUN =================
+if __name__ == "__main__":
+    if platform.system() == "Windows":
+        EDR().run()
