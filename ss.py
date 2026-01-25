@@ -1,173 +1,207 @@
-import os, platform, time, hashlib, psutil, math, collections, json, requests, webbrowser
+import os, json, zipfile, psutil, winreg, tempfile, requests, hashlib
 from datetime import datetime
 
-DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1464939014787436741/W_vdUtu_JZTETx0GYz4iyZoOTnMKYyH6RU6oZnGbzz5rEAQOhuKLqyzX6QlRr-oPgsxx"
-HEADER_IMAGE_URL = "https://coralmc.it/_next/static/media/logo.acbad3a9.png"
-
 # ================= CONFIG =================
-class CFG:
-    VERSION = "2.1.0-FORENSIC-EDR-PRO"
-    SCAN_ID = hashlib.sha256(str(time.time()).encode()).hexdigest()[:12]
+DISCORD_WEBHOOK = "INSERISCI_WEBHOOK"
+USER_HTML_IMAGE = "INSERISCI_IMMAGINE"
 
-    ENTROPY_HIGH = 7.6
+SCAN_ID = hashlib.sha1(str(datetime.now()).encode()).hexdigest()[:10]
 
-    TRUSTED_VENDORS = [
-        "microsoft","windows","intel","amd","nvidia",
-        "discord","google","mozilla","oracle","java","steam"
-    ]
+# ====== DATABASE CHEAT CERTI ======
+CHEAT_SOFTWARE = {
+    "liquidbounce": "Minecraft cheat client (LiquidBounce)",
+    "fdp": "Minecraft cheat client (FDP)",
+    "rise": "Minecraft cheat client (Rise)",
+    "novoline": "Minecraft cheat client (Novoline)",
+    "vape": "Minecraft ghost client (Vape)",
+    "wurst": "Minecraft hack client",
+    "impact": "Minecraft hack client",
+    "meteor": "Minecraft hack client",
+    "aristois": "Minecraft hack client",
+    "sigma": "Minecraft hack client",
+    "horion": "Minecraft Bedrock cheat",
+    "cheat engine": "Memory editor",
+    "process hacker": "Advanced process inspector",
+    "x64dbg": "Debugger",
+    "extreme injector": "DLL Injector",
+    "xenos": "DLL Injector",
+    "autoclicker": "Autoclicker software",
+    "op auto clicker": "Autoclicker",
+    "gs auto clicker": "Autoclicker"
+}
 
-    CONFIRMED_CHEATS = {
-        "liquidbounce": ["liquidbounce", "lb.jar"],
-        "wurst": ["wurst"],
-        "meteor": ["meteor-client"],
-        "impact": ["impact"],
-        "sigma": ["sigma"],
-        "fdp": ["fdpclient"],
-        "novoline": ["novoline"],
-        "vape": ["vape", "vapev4"]
-    }
+LB_NAMESPACES = [
+    "net/ccbluex/liquidbounce",
+    "liquidbounce/injection",
+    "liquidbounce/utils",
+    "liquidbounce/event"
+]
 
-# ================= UTILS =================
-def entropy(data):
-    if len(data) < 2048: return 0
-    c = collections.Counter(data)
-    l = len(data)
-    return -sum((v/l)*math.log(v/l,2) for v in c.values())
-
-def sha256(p):
-    try:
-        h = hashlib.sha256()
-        with open(p,"rb") as f:
-            for b in iter(lambda:f.read(65536),b""):
-                h.update(b)
-        return h.hexdigest()
-    except:
-        return None
-
-def whitelisted(path):
-    p = path.lower()
-    return any(v in p for v in CFG.TRUSTED_VENDORS)
-
-# ================= EDR CORE =================
-class EDR:
+# ================= CORE =================
+class EDRScanner:
     def __init__(self):
-        self.confirmed = []
-        self.suspicious = []
-        self.system = {}
+        self.findings = []
+        self.logs = []
 
-    def system_info(self):
-        self.system = {
-            "OS": platform.platform(),
-            "BOOT": datetime.fromtimestamp(psutil.boot_time()).isoformat()
-        }
+    def log(self, msg):
+        self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-    def minecraft_scan(self):
-        mc = os.path.join(os.environ.get("APPDATA",""),".minecraft")
-        if not os.path.exists(mc):
-            return
-
-        for root,_,files in os.walk(mc):
-            low = root.lower()
-            for cheat,patterns in CFG.CONFIRMED_CHEATS.items():
-                if any(p in low for p in patterns):
-                    self.confirmed.append({
-                        "name": cheat,
-                        "path": root,
-                        "reason": "Known Minecraft cheat directory signature"
-                    })
-
-            for f in files:
-                fl = f.lower()
-                for cheat,patterns in CFG.CONFIRMED_CHEATS.items():
-                    if any(p in fl for p in patterns):
-                        self.confirmed.append({
-                            "name": cheat,
-                            "path": os.path.join(root,f),
-                            "reason": "Known Minecraft cheat binary"
-                        })
-
-    def process_scan(self):
-        for p in psutil.process_iter(["name","exe"]):
+    # ---------- INSTALLED SOFTWARE ----------
+    def scan_installed(self):
+        self.log("Scan software installati")
+        paths = [
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+        ]
+        for p in paths:
             try:
-                exe = p.info["exe"]
-                if not exe or not os.path.exists(exe): continue
-                if whitelisted(exe): continue
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, p) as k:
+                    for i in range(winreg.QueryInfoKey(k)[0]):
+                        try:
+                            sk = winreg.OpenKey(k, winreg.EnumKey(k, i))
+                            name, _ = winreg.QueryValueEx(sk, "DisplayName")
+                            lname = name.lower()
+                            for key, desc in CHEAT_SOFTWARE.items():
+                                if key in lname:
+                                    self.findings.append({
+                                        "type": "Installed software",
+                                        "name": name,
+                                        "description": desc,
+                                        "certainty": "100%"
+                                    })
+                        except:
+                            pass
+            except:
+                pass
 
-                e = entropy(open(exe,"rb").read(65536))
-                if e > CFG.ENTROPY_HIGH:
-                    self.suspicious.append({
-                        "path": exe,
-                        "reason": f"High entropy executable ({round(e,2)})"
-                    })
-            except: pass
+    # ---------- PROCESSI ATTIVI ----------
+    def scan_processes(self):
+        self.log("Scan processi attivi")
+        for p in psutil.process_iter(['name', 'exe']):
+            try:
+                n = (p.info['name'] or "").lower()
+                e = (p.info['exe'] or "").lower()
+                for key, desc in CHEAT_SOFTWARE.items():
+                    if key in n or key in e:
+                        self.findings.append({
+                            "type": "Running process",
+                            "name": p.info['name'],
+                            "path": p.info['exe'],
+                            "description": desc,
+                            "certainty": "100%"
+                        })
+            except:
+                pass
 
-    def report(self):
-        return {
-            "scan_id": CFG.SCAN_ID,
-            "version": CFG.VERSION,
-            "system": self.system,
-            "confirmed_cheats": self.confirmed,
-            "suspicious": self.suspicious
-        }
+    # ---------- MINECRAFT MODS ----------
+    def scan_minecraft(self):
+        self.log("Scan Minecraft mods")
+        mods = os.path.join(os.environ.get("APPDATA",""), ".minecraft", "mods")
+        if not os.path.isdir(mods):
+            return
+        for f in os.listdir(mods):
+            if not f.lower().endswith(".jar"):
+                continue
+            try:
+                with zipfile.ZipFile(os.path.join(mods, f)) as z:
+                    names = [n.lower() for n in z.namelist()]
+                    for ns in LB_NAMESPACES:
+                        if any(ns in n for n in names):
+                            self.findings.append({
+                                "type": "Minecraft mod",
+                                "name": "LiquidBounce",
+                                "file": f,
+                                "description": "LiquidBounce namespace rilevato",
+                                "certainty": "100%"
+                            })
+            except:
+                pass
 
-    def discord(self, report):
-        if self.confirmed:
-            fields = [{
-                "name": c["name"].upper(),
-                "value": f"{c['path']}\n{c['reason']}",
-                "inline": False
-            } for c in self.confirmed]
-        else:
-            fields = [{
-                "name":"No confirmed cheats",
-                "value":"System appears clean",
-                "inline":False
-            }]
+    # ---------- REPORT ----------
+    def build_reports(self):
+        tmp = tempfile.gettempdir()
+        log_path = os.path.join(tmp, f"scan_{SCAN_ID}.log")
+        json_path = os.path.join(tmp, f"scan_{SCAN_ID}.json")
+        html_path = os.path.join(tmp, f"scan_{SCAN_ID}.html")
+        user_html = os.path.join(tmp, f"user_{SCAN_ID}.html")
 
-        embed = {
-            "title":"EDR Forensic Result",
-            "description":f"Scan ID `{CFG.SCAN_ID}`",
-            "color": 15158332 if self.confirmed else 3066993,
-            "fields": fields
-        }
-
-        requests.post(DISCORD_WEBHOOK, json={"embeds":[embed]})
-        requests.post(
-            DISCORD_WEBHOOK,
-            files={"file":("report.json", json.dumps(report,indent=2))}
+        open(log_path, "w", encoding="utf-8").write(
+            "\n".join(self.logs) + "\n\n" + json.dumps(self.findings, indent=2)
+        )
+        open(json_path, "w", encoding="utf-8").write(
+            json.dumps(self.findings, indent=2)
         )
 
-    def thank_you_html(self):
+        # DASHBOARD STAFF
         html = f"""
         <html>
-        <body style="background:#0d1117;color:#c9d1d9;font-family:Segoe UI;text-align:center;padding:40px">
-            <img src="{HEADER_IMAGE_URL}" style="max-width:90%;border-radius:12px"><br><br>
-            <h1>Grazie per la pazienza</h1>
-            <p>L’esito del controllo è ora in fase di visualizzazione da parte dello staff.</p>
+        <head>
+        <style>
+        body {{ background:#0d1117;color:#c9d1d9;font-family:Segoe UI;padding:30px }}
+        .card {{ background:#161b22;padding:20px;margin:15px;border-radius:10px }}
+        .red {{ border-left:6px solid #f85149 }}
+        </style>
+        </head>
+        <body>
+        <h1>EDR Forensic Dashboard</h1>
+        <p>Scan ID: {SCAN_ID}</p>
+        """
+
+        for f in self.findings:
+            html += f"""
+            <div class="card red">
+            <b>{f['name']}</b><br>
+            Tipo: {f['type']}<br>
+            Descrizione: {f['description']}<br>
+            Certezza: {f['certainty']}
+            </div>
+            """
+
+        html += "</body></html>"
+        open(html_path, "w", encoding="utf-8").write(html)
+
+        # HTML UTENTE
+        open(user_html, "w", encoding="utf-8").write(f"""
+        <html>
+        <body style="background:#0b0b0b;color:white;text-align:center;font-family:Segoe UI">
+        <img src="{USER_HTML_IMAGE}" style="width:90%;margin-top:20px">
+        <h1>Grazie per la pazienza</h1>
+        <p>Il controllo è stato completato.<br>
+        L’esito è ora in visualizzazione dello staff.</p>
         </body>
         </html>
-        """
-        path = os.path.abspath("scan_completed.html")
-        with open(path,"w",encoding="utf-8") as f:
-            f.write(html)
-        webbrowser.open(path)
+        """)
 
+        return log_path, json_path, html_path, user_html
+
+    # ---------- DISCORD ----------
+    def send_discord(self, files):
+        if not self.findings:
+            return
+        embeds = []
+        for f in self.findings:
+            embeds.append({
+                "title": f["name"],
+                "description": f"{f['description']}\nCertezza: {f['certainty']}",
+                "color": 16711680
+            })
+
+        requests.post(DISCORD_WEBHOOK, json={
+            "content": "@everyone **SCAN COMPLETATA – CHEAT CERTI RILEVATI**",
+            "embeds": embeds[:10]
+        })
+
+        for f in files[:-1]:
+            requests.post(DISCORD_WEBHOOK, files={"file": open(f, "rb")})
+
+    # ---------- RUN ----------
     def run(self):
-        print("[+] Scan started")
-        self.system_info()
-        self.minecraft_scan()
-        self.process_scan()
+        self.scan_installed()
+        self.scan_processes()
+        self.scan_minecraft()
+        files = self.build_reports()
+        self.send_discord(files)
+        os.startfile(files[-1])
 
-        report = self.report()
-        self.discord(report)
-
-        if self.confirmed:
-            print("[!] Confirmed detections found")
-
-        self.thank_you_html()
-        print("[+] Scan completed")
-
-# ================= RUN =================
-if __name__ == "__main__":
-    if platform.system() == "Windows":
-        EDR().run()
+# ================= START =================
+EDRScanner().run()
