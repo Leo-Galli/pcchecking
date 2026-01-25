@@ -1,8 +1,8 @@
 import os, platform, time, hashlib, psutil, math, collections, json, requests, webbrowser
 from datetime import datetime
 
-DISCORD_WEBHOOK = "PUT_WEBHOOK_HERE"
-HEADER_IMAGE_URL = "PUT_IMAGE_URL_HERE"
+DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1464939014787436741/W_vdUtu_JZTETx0GYz4iyZoOTnMKYyH6RU6oZnGbzz5rEAQOhuKLqyzX6QlRr-oPgsxx"
+HEADER_IMAGE_URL = "https://coralmc.it/_next/static/media/logo.acbad3a9.png"
 
 # ================= CONFIG =================
 class CFG:
