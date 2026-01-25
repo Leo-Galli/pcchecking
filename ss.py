@@ -1,321 +1,230 @@
-import os, subprocess, platform, time, hashlib, psutil, math, collections, webbrowser
-import csv, zipfile, json, statistics, logging, socket
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import os, platform, time, hashlib, psutil, math, collections, webbrowser, json, csv, logging, subprocess
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
-try:
-    import winreg
-except:
-    winreg = None
+# ---------------- CONFIG ----------------
+class CFG:
+    VERSION = "1.0.0-STABLE-FORENSIC"
+    SCAN_ID = hashlib.sha1(str(time.time()).encode()).hexdigest()[:10].upper()
 
-try:
-    import ctypes
-    user32 = ctypes.windll.user32
-except:
-    user32 = None
+    HTML = f"EDR_{SCAN_ID}.html"
+    JSON = f"EDR_{SCAN_ID}.json"
+    LOG  = f"EDR_{SCAN_ID}.log"
 
-# =========================
-# CONFIG
-# =========================
-class ForensicConfig:
-    VERSION = "1.0.0-EDR-FORENSIC-PRO-STABLE"
-    SCAN_ID = hashlib.sha256(str(time.time()).encode()).hexdigest()[:10]
+    MAX_THREADS = 8
+    ENTROPY_CRITICAL = 7.9
+    MIN_SCORE_TO_LOG = 25   # <— anti spam
+    CONFIRMED_SCORE  = 70
 
-    REPORT_HTML = f"EDR_{SCAN_ID}.html"
-    REPORT_JSON = f"EDR_{SCAN_ID}.json"
-    REPORT_CSV  = f"EDR_{SCAN_ID}.csv"
+    SAFE_EXT = {".png",".jpg",".jpeg",".gif",".mp3",".mp4",".txt",".json",".log",".pdf",".zip",".rar",".css"}
+    TRUSTED = ["windows","microsoft","intel","amd","nvidia","steam","discord","google","mozilla","java"]
 
-    ENTROPY_HIGH = 7.8
-    INPUT_SECONDS = 30
-    PREFETCH_DAYS = 5
-
-    MAX_THREADS = 12
-    FILE_THREADS = 6
-    MAX_FILES_PER_DIR = 250
-
-    MIN_SCORE_TO_LOG = 20
-
-    SAFE_EXT = {
-        ".png",".jpg",".jpeg",".gif",".mp3",".mp4",".wav",".ogg",".svg",".ico",
-        ".webp",".css",".json",".log",".txt",".xml",".pdf",".docx",".zip",".rar",
-        ".ttf",".otf",".md",".yml",".ini"
-    }
-
-    TRUSTED = [
-        "microsoft","windows","nvidia","amd","intel","steam","valve",
-        "discord","google","mozilla","oracle","java","mojang",
-        "corsair","logitech","razer","asus","msi","gigabyte"
-    ]
-
-    WEIGHTS = {
-        "RWX": 40,
-        "GHOST": 35,
-        "ENTROPY": 20,
-        "RENAME": 20,
-        "PREFETCH": 15,
-        "PERSIST": 20,
-        "KERNEL": 45,
-        "INPUT": 30,
-        "RESOURCE": 25,
-        "NETWORK": 25
+    MALWARE_HASHES = {
+        # esempio
+        "e3b0c44298fc1c149afbf4c8996fb924": "Known test malware"
     }
 
 logging.basicConfig(
-    filename=f"EDR_{ForensicConfig.SCAN_ID}.log",
+    filename=CFG.LOG,
     level=logging.INFO,
-    format="%(asctime)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-# =========================
-# UTIL
-# =========================
-class Analysis:
-    @staticmethod
-    def entropy(data):
-        if len(data) < 2048:
-            return 0
-        c = collections.Counter(data)
-        l = len(data)
-        return -sum((v/l) * math.log(v/l, 2) for v in c.values())
+# ---------------- UTILS ----------------
+def entropy(data):
+    if len(data) < 2048:
+        return 0
+    c = collections.Counter(data)
+    l = len(data)
+    return -sum((v/l)*math.log(v/l,2) for v in c.values())
 
-    @staticmethod
-    def sha256(path):
-        try:
-            if not os.path.exists(path): return None
-            if os.path.splitext(path)[1].lower() in ForensicConfig.SAFE_EXT:
-                return None
-            h = hashlib.sha256()
-            with open(path,"rb") as f:
-                for b in iter(lambda:f.read(131072),b""):
-                    h.update(b)
-            return h.hexdigest()
-        except:
-            return None
+def whitelisted(path):
+    p = path.lower()
+    return any(t in p for t in CFG.TRUSTED)
 
-    @staticmethod
-    def whitelisted(path):
-        p = str(path).lower()
-        return any(x in p for x in ForensicConfig.TRUSTED)
+def sha256(path):
+    try:
+        h = hashlib.sha256()
+        with open(path,"rb") as f:
+            for b in iter(lambda:f.read(65536),b""):
+                h.update(b)
+        return h.hexdigest()
+    except:
+        return None
 
-# =========================
-# EDR CORE
-# =========================
+# ---------------- CORE ----------------
 class EDR:
     def __init__(self):
         self.events = collections.defaultdict(list)
+        self.inventory = {}
         self.start = time.time()
 
-    def add(self,pivot,layer,score,desc,why):
-        if score < ForensicConfig.MIN_SCORE_TO_LOG:
+    def add(self, path, layer, score, desc, reason):
+        if score < CFG.MIN_SCORE_TO_LOG:
             return
-        if isinstance(pivot,str) and Analysis.whitelisted(pivot):
+        if path and whitelisted(path):
             return
-        self.events[pivot].append({
+        self.events[path].append({
             "layer":layer,
             "score":score,
             "desc":desc,
-            "why":why,
-            "time":datetime.now().isoformat(timespec="seconds")
+            "reason":reason,
+            "time":datetime.now().isoformat(timespec="seconds"),
+            "path":path
         })
+        logging.info(f"{layer} | {path} | {desc}")
 
-    # =========================
-    # RUN
-    # =========================
-    def run(self):
-        print("[+] EDR Scan started...")
-        with ThreadPoolExecutor(max_workers=ForensicConfig.MAX_THREADS) as t:
-            tasks = [
-                t.submit(self.memory),
-                t.submit(self.filesystem),
-                t.submit(self.input_check),
-                t.submit(self.network)
-            ]
-            if platform.system()=="Windows":
-                tasks += [
-                    t.submit(self.prefetch),
-                    t.submit(self.kernel),
-                    t.submit(self.persistence),
-                    t.submit(self.resourcepacks)
-                ]
-            for _ in as_completed(tasks):
-                pass
-        self.report()
-
-    # =========================
-    # MEMORY
-    # =========================
-    def memory(self):
-        for p in psutil.process_iter(["pid","exe"]):
+    # -------- INVENTORY --------
+    def system_inventory(self):
+        self.inventory = {
+            "OS": platform.platform(),
+            "CPU": platform.processor(),
+            "RAM_GB": round(psutil.virtual_memory().total/(1024**3),1),
+            "Processes":[]
+        }
+        for p in psutil.process_iter(["name","exe"]):
             try:
-                rwx=False
-                for m in p.memory_maps(grouped=False):
-                    if "x" in m.perms and "w" in m.perms and not m.path:
-                        rwx=True
-                if rwx:
-                    self.add(p.pid,"MEMORY",ForensicConfig.WEIGHTS["RWX"],
-                             "RWX memory region",
-                             "Writable + Executable anonymous memory")
-                    if not p.exe():
-                        self.add(p.pid,"PROCESS",ForensicConfig.WEIGHTS["GHOST"],
-                                 "Ghost process","No executable on disk")
+                if p.info["exe"] and whitelisted(p.info["exe"]):
+                    self.inventory["Processes"].append(p.info["name"])
             except:
                 pass
 
-    # =========================
-    # FILESYSTEM
-    # =========================
+    # -------- FILESYSTEM --------
     def filesystem(self):
         bases = [os.environ.get(x) for x in ["TEMP","APPDATA","LOCALAPPDATA"] if os.environ.get(x)]
-        hashes = collections.defaultdict(list)
         for base in bases:
             for root,_,files in os.walk(base):
-                if Analysis.whitelisted(root): continue
-                for f in files[:ForensicConfig.MAX_FILES_PER_DIR]:
-                    p=os.path.join(root,f)
-                    if os.path.splitext(p)[1].lower() in ForensicConfig.SAFE_EXT:
+                if whitelisted(root):
+                    continue
+                for f in files[:200]:
+                    p = os.path.join(root,f)
+                    ext = os.path.splitext(p)[1].lower()
+                    if ext in CFG.SAFE_EXT:
                         continue
-                    h=Analysis.sha256(p)
-                    if not h: continue
-                    hashes[h].append(p)
+
+                    h = sha256(p)
+                    if not h:
+                        continue
+
+                    # HASH CERTO
+                    if h in CFG.MALWARE_HASHES:
+                        self.add(
+                            p,"MALWARE",100,
+                            f"Known malware: {CFG.MALWARE_HASHES[h]}",
+                            "Exact hash match"
+                        )
+                        continue
+
+                    # ENTROPY SOLO COME SUPPORTO
                     try:
                         with open(p,"rb") as fd:
-                            e=Analysis.entropy(fd.read(65536))
-                            if e>ForensicConfig.ENTROPY_HIGH:
-                                self.add(h,"FILESYSTEM",ForensicConfig.WEIGHTS["ENTROPY"],
-                                         "High entropy binary","Packed or encrypted")
+                            e = entropy(fd.read(65536))
+                        if e > CFG.ENTROPY_CRITICAL:
+                            self.add(
+                                p,"FILESYSTEM",30,
+                                "High entropy executable",
+                                "Packed binary (needs correlation)"
+                            )
                     except:
                         pass
-        for h,paths in hashes.items():
-            if len(paths)>1:
-                self.add(h,"FILESYSTEM",ForensicConfig.WEIGHTS["RENAME"],
-                         "Rename chain","Same hash, multiple names")
 
-    # =========================
-    # INPUT
-    # =========================
-    def input_check(self):
-        if not user32: return
-        clicks=[]
-        last=None
-        start=time.time()
-        while time.time()-start<ForensicConfig.INPUT_SECONDS:
-            if user32.GetAsyncKeyState(0x01)&0x8000:
-                now=time.time()
-                if last: clicks.append(now-last)
-                last=now
-            time.sleep(0.004)
-        if len(clicks)>30:
-            if statistics.pstdev(clicks)<0.008:
-                self.add("INPUT","INPUT",ForensicConfig.WEIGHTS["INPUT"],
-                         "Autoclicker pattern","Very low click jitter")
-
-    # =========================
-    # NETWORK
-    # =========================
-    def network(self):
-        for c in psutil.net_connections(kind="inet"):
-            if c.status=="ESTABLISHED" and c.raddr:
-                ip=c.raddr.ip if hasattr(c.raddr,"ip") else c.raddr[0]
-                if not ip.startswith(("10.","192.168","172.")):
-                    self.add(ip,"NETWORK",ForensicConfig.WEIGHTS["NETWORK"],
-                             "External connection","Non-local active connection")
-
-    # =========================
-    # PREFETCH
-    # =========================
-    def prefetch(self):
-        path=r"C:\Windows\Prefetch"
-        if not os.path.exists(path): return
-        now=time.time()
-        for f in os.listdir(path):
-            if f.lower().endswith(".pf"):
-                age=(now-os.path.getmtime(os.path.join(path,f)))/86400
-                if age<ForensicConfig.PREFETCH_DAYS:
-                    self.add(f,"PREFETCH",ForensicConfig.WEIGHTS["PREFETCH"],
-                             "Recent execution","Recently run executable")
-
-    # =========================
-    # KERNEL
-    # =========================
-    def kernel(self):
+    # -------- PERSISTENCE --------
+    def persistence(self):
         try:
-            out=subprocess.check_output("driverquery /v /fo csv",shell=True)
-            r=csv.reader(out.decode(errors="ignore").splitlines())
-            next(r)
-            for row in r:
-                p=row[10].lower()
-                if "system32\\drivers" not in p and not Analysis.whitelisted(p):
-                    self.add(p,"KERNEL",ForensicConfig.WEIGHTS["KERNEL"],
-                             "Suspicious driver","Kernel driver outside trusted path")
+            import winreg
+            keys=[
+                (winreg.HKEY_CURRENT_USER,r"Software\Microsoft\Windows\CurrentVersion\Run"),
+                (winreg.HKEY_LOCAL_MACHINE,r"Software\Microsoft\Windows\CurrentVersion\Run")
+            ]
+            for root,path in keys:
+                with winreg.OpenKey(root,path) as k:
+                    for i in range(winreg.QueryInfoKey(k)[1]):
+                        _,v,_ = winreg.EnumValue(k,i)
+                        exe = v.split(" ")[0].replace('"',"")
+                        if exe and not whitelisted(exe):
+                            self.add(
+                                exe,"PERSISTENCE",60,
+                                "Suspicious autostart entry",
+                                "Runs at boot outside trusted vendors"
+                            )
         except:
             pass
 
-    # =========================
-    # PERSISTENCE
-    # =========================
-    def persistence(self):
-        if not winreg: return
-        for root,path in [
-            (winreg.HKEY_CURRENT_USER,r"Software\Microsoft\Windows\CurrentVersion\Run"),
-            (winreg.HKEY_LOCAL_MACHINE,r"Software\Microsoft\Windows\CurrentVersion\Run")
-        ]:
-            try:
-                with winreg.OpenKey(root,path) as k:
-                    for i in range(winreg.QueryInfoKey(k)[1]):
-                        _,v,_=winreg.EnumValue(k,i)
-                        h=Analysis.sha256(v.split(" ")[0].replace('"',""))
-                        if h:
-                            self.add(h,"REGISTRY",ForensicConfig.WEIGHTS["PERSIST"],
-                                     "Startup persistence","Runs at boot")
-            except:
-                pass
+    # -------- KERNEL --------
+    def kernel(self):
+        try:
+            out = subprocess.check_output("driverquery /fo csv",shell=True)
+            r = csv.reader(out.decode(errors="ignore").splitlines())
+            next(r)
+            for row in r:
+                p = row[-1].lower()
+                if p and "system32\\drivers" not in p:
+                    self.add(
+                        p,"KERNEL",80,
+                        "Non standard kernel driver",
+                        "Driver outside system path"
+                    )
+        except:
+            pass
 
-    # =========================
-    # RESOURCEPACKS
-    # =========================
-    def resourcepacks(self):
-        rp=os.path.join(os.environ.get("APPDATA",""),".minecraft","resourcepacks")
-        if not os.path.exists(rp): return
-        for f in os.listdir(rp):
-            if f.lower().endswith(".zip"):
-                try:
-                    with zipfile.ZipFile(os.path.join(rp,f)) as z:
-                        models=[n for n in z.namelist() if "models" in n]
-                        if len(models)>80:
-                            self.add(f,"RESOURCEPACK",ForensicConfig.WEIGHTS["RESOURCE"],
-                                     "Xray resourcepack","Abnormal model density")
-                except:
-                    pass
+    # -------- RUN --------
+    def run(self):
+        self.system_inventory()
+        with ThreadPoolExecutor(max_workers=CFG.MAX_THREADS) as t:
+            t.submit(self.filesystem)
+            t.submit(self.persistence)
+            t.submit(self.kernel)
 
-    # =========================
-    # REPORT
-    # =========================
-    def report(self):
+        self.render()
+
+    # -------- REPORT --------
+    def render(self):
         results=[]
         for p,ev in self.events.items():
             score=sum(e["score"] for e in ev)
-            lvl="CONFIRMED" if score>=70 else "SUSPICIOUS" if score>=40 else "INFO"
-            results.append((p,lvl,score,ev))
+            level="CONFIRMED" if score>=CFG.CONFIRMED_SCORE else "SUSPICIOUS"
+            results.append((p,level,score,ev))
 
-        html="<html><body style='background:#0d1117;color:#c9d1d9;font-family:Segoe UI;padding:30px'>"
-        html+=f"<h1>EDR Report</h1><p>Scan {ForensicConfig.SCAN_ID}</p>"
+        # JSON
+        with open(CFG.JSON,"w",encoding="utf-8") as f:
+            json.dump({
+                "scan_id":CFG.SCAN_ID,
+                "inventory":self.inventory,
+                "findings":[
+                    {"path":p,"level":l,"score":s,"events":ev}
+                    for p,l,s,ev in results
+                ]
+            },f,indent=2)
+
+        # HTML
+        html=f"""
+        <html><body style="background:#0d1117;color:#c9d1d9;font-family:Segoe UI;padding:30px">
+        <h1>EDR Forensic Report</h1>
+        <small>ID {CFG.SCAN_ID} | v{CFG.VERSION}</small>
+
+        <h2>🧾 System</h2>
+        <pre>{json.dumps(self.inventory,indent=2)}</pre>
+
+        <h2>🚨 Findings</h2>
+        """
         for p,l,s,ev in sorted(results,key=lambda x:x[2],reverse=True):
-            html+=f"<details><summary><b>{p}</b> | {l} | {s}</summary>"
+            html+=f"<div style='border-left:6px solid {'#f85149' if l=='CONFIRMED' else '#d29922'};padding:10px;margin:10px'>"
+            html+=f"<b>{p}</b> | {l} | Score {s}<br>"
             for e in ev:
-                html+=f"<div>[{e['layer']}] {e['desc']} – {e['why']}</div>"
-            html+="</details>"
+                html+=f"<small>[{e['layer']}] {e['desc']} — {e['reason']}</small><br>"
+            html+="</div>"
         html+="</body></html>"
 
-        with open(ForensicConfig.REPORT_HTML,"w",encoding="utf-8") as f: f.write(html)
-        with open(ForensicConfig.REPORT_JSON,"w",encoding="utf-8") as f:
-            json.dump(results,f,indent=2)
+        with open(CFG.HTML,"w",encoding="utf-8") as f:
+            f.write(html)
 
-        webbrowser.open(os.path.abspath(ForensicConfig.REPORT_HTML))
-        print("[+] Scan complete. Report opened.")
+        # OPEN EVERYTHING
+        webbrowser.open(os.path.abspath(CFG.HTML))
+        webbrowser.open(os.path.abspath(CFG.JSON))
+        webbrowser.open(os.path.abspath(CFG.LOG))
 
-# =========================
-# MAIN
-# =========================
+
+# ---------------- RUN ----------------
 if __name__=="__main__":
     if platform.system()=="Windows":
         EDR().run()
