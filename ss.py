@@ -1,260 +1,352 @@
+
 # ============================================================
-# EDR 12.0 – HARDENED USER-LAND DETECTION
+# SCREENSHARE – Audit Tool (Terminal Edition)
+# Versione: v3.0.0
+# Server: CoralMC | Staff: CoralMC Staff
+# Developed by: LeoGalli
 # ============================================================
 
-import os, sys, time, json, math, zipfile, psutil, hashlib, platform
-import threading, collections, inspect, requests
-from datetime import datetime, timedelta
+import os, sys, time, math, json, platform, ctypes, hashlib, threading, collections
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 
 # ====================== DISCORD ======================
 DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1464939014787436741/W_vdUtu_JZTETx0GYz4iyZoOTnMKYyH6RU6oZnGbzz5rEAQOhuKLqyzX6QlRr-oPgsxx"
 
-# ====================== LOGGING ======================
-class Log:
-    @staticmethod
-    def phase(t): print(f"\n\033[▶] {t}\033")
-    @staticmethod
-    def ok(t): print(f"\033[✓] {t}\033")
-    @staticmethod
-    def warn(t): print(f"\033[!] {t}\033")
-    @staticmethod
-    def bad(t): print(f"\033[✗] {t}\033")
-    @staticmethod
-    def info(t): print(f"\033[i] {t}\033")
+# ====================== COLORS ======================
+class C:
+    RESET="\033[0m"; BOLD="\033[1m"
+    CYAN="\033[96m"; BLUE="\033[94m"
+    GRAY="\033[90m"; GREEN="\033[92m"
+    YELLOW="\033[93m"; RED="\033[91m"
 
 # ====================== CONFIG ======================
 class CFG:
-    VERSION = "12.0.0-HARDENED"
-    SCAN_ID = hashlib.sha256(str(time.time()).encode()).hexdigest()[:10]
-
-    THREADS = 12
-    ENTROPY_HIGH = 7.2
+    THREADS = 16
+    ENTROPY_HIGH = 7.1
     RECENT_HOURS = 168
 
-    SCORE_CONFIRMED = 250
-    SCORE_SUSPICIOUS = 120
+    EXEC_EXT = {".exe",".dll",".jar",".ps1",".bat",".scr",".sys"}
+    SAFE_EXT = {".txt",".log",".json",".xml",".cfg",".png",".jpg",".jpeg",".md"}
 
-    EXEC_EXT = {".exe",".dll",".jar",".scr",".ps1",".bat",".vbs"}
-    SAFE_EXT = {".txt",".png",".jpg",".json",".xml",".cfg",".log"}
-
-    JVM_FLAGS = {"-javaagent","-noverify","-Xbootclasspath","attach"}
-
-    CHEAT_SIGNATURES = {
-        "liquidbounce": [
-            "net/ccbluex/liquidbounce",
-            "liquidbounce",
-            "killaura",
-            "autoclicker",
-            "reach"
-        ],
-        "wurst": ["net/wurstclient","wurst","flight","aimassist"],
-        "impact": ["impactclient","baritone","aimassist"],
-        "sigma": ["sigma","monsoon","elytrafly"]
+    # Keyword intelligence (estesa)
+    KEYWORDS = {
+        # generic
+        "cheat","hack","hacked","bypass","inject","injection","loader","mapper",
+        # combat
+        "killaura","aim","aimbot","trigger","reach","velocity","noslow",
+        # macro / click
+        "autoclick","auto_click","clicker","macro","doubleclick",
+        # ghost
+        "ghost","assist","legit","humanizer",
+        # clients / mods
+        "wurst","impact","meteor","aristois","sigma","rusherhack",
+        "lunar","badlion","feather","liquid","rise","novoline",
+        # technical
+        "dll","overlay","hook","driver","agent","bootstrap","reflect","jni"
     }
-
-    MC_HINTS = {".minecraft","mods","versions","lunar","badlion","tlauncher"}
 
     SCAN_DIRS = [
         os.environ.get("APPDATA"),
         os.environ.get("LOCALAPPDATA"),
-        os.environ.get("PROGRAMDATA"),
-        os.path.expanduser("~/Downloads"),
-        os.path.expanduser("~/Desktop")
+        os.environ.get("TEMP"),
+        "C:\\Windows\\Temp",
+        "C:\\Windows\\Prefetch",
+        os.path.expanduser("~\\.minecraft")
     ]
 
-# ====================== UTILS ======================
-def now(): return datetime.utcnow().isoformat()
+    SCORE_LEVELS = {
+        "CLEAN": 0,
+        "LOW_RISK": 60,
+        "SUSPICIOUS": 150,
+        "HIGH_RISK": 280,
+        "CRITICAL": 420
+    }
 
+    # Hash whitelist (estratto – esempio). Se NON verificabile → flag.
+    # In produzione: amplia con hash ufficiali verificati.
+    SAFE_HASHES = {
+        # Windows system (esempi)
+        "f2c7bb8acc97f92e987a2d4087d021b1a4d8d2c98f1b1d6d1a8e9b9f0c4c9a1a",
+        "9b0a2a9c6b9f6a4f0f7d1e3c2b9d4a8f6e1c2b7a9d0e4f6b8c1a2e3d4f5",
+        # Java (esempi)
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        # Launcher noti (esempi)
+        "3a7bd3e2360a3d80a6d2c6c8b8c5f9e7a6b5c4d3e2f1a0b9c8d7e6f5a4b3"
+    }
+
+# ====================== UI ======================
+def clear(): os.system("cls" if os.name=="nt" else "clear")
+
+def box(title, subtitle):
+    w=88
+    print("╔"+"═"*w+"╗")
+    print("║"+title.center(w)+"║")
+    print("║"+subtitle.center(w)+"║")
+    print("╚"+"═"*w+"╝")
+
+def sep(): print(f"{C.GRAY}{'─'*92}{C.RESET}")
+def section(t):
+    sep()
+    print(f"{C.CYAN}{C.BOLD}▶ {t}{C.RESET}")
+    sep()
+
+def ok(t): print(f"{C.GREEN}✔ {t}{C.RESET}")
+def warn(t): print(f"{C.YELLOW}⚠ {t}{C.RESET}")
+def info(t): print(f"{C.BLUE}ℹ {t}{C.RESET}")
+def err(t): print(f"{C.RED}✖ {t}{C.RESET}")
+def wait(s=0.2): time.sleep(s)
+
+# ====================== UTILS ======================
 def entropy(path, size=65536):
     try:
-        with open(path,"rb") as f:
-            data = f.read(size)
-        if len(data) < 2048: return 0
-        freq = collections.Counter(data)
-        l = len(data)
+        with open(path,"rb") as f: data=f.read(size)
+        if len(data)<2048: return 0
+        freq=collections.Counter(data); l=len(data)
         return -sum((v/l)*math.log(v/l,2) for v in freq.values())
-    except:
-        return 0
+    except: return 0
 
 def recent(path):
     try:
-        return datetime.now() - datetime.fromtimestamp(os.path.getmtime(path)) < timedelta(hours=CFG.RECENT_HOURS)
-    except:
-        return False
+        return datetime.now(timezone.utc) - datetime.fromtimestamp(
+            os.path.getmtime(path), tz=timezone.utc
+        ) < timedelta(hours=CFG.RECENT_HOURS)
+    except: return False
 
-def is_valid_exe(path):
+def is_admin():
+    try: return ctypes.windll.shell32.IsUserAnAdmin()
+    except: return False
+
+def risk_level(score):
+    lvl="CLEAN"
+    for k,v in CFG.SCORE_LEVELS.items():
+        if score>=v: lvl=k
+    return lvl
+
+def sha256(path):
     try:
+        h=hashlib.sha256()
         with open(path,"rb") as f:
-            return f.read(2) == b"MZ"
-    except:
-        return False
+            for b in iter(lambda:f.read(8192), b""): h.update(b)
+        return h.hexdigest()
+    except: return None
+
+def deps_check():
+    missing=[]
+    try: import psutil
+    except: missing.append("psutil")
+    try: import requests
+    except: missing.append("requests")
+    return missing
 
 # ====================== CORE ======================
-class EDR:
+class ScreenShare:
     def __init__(self):
-        self.events = collections.defaultdict(list)
-        self.timeline = []
-        self.system = {}
-        self.lock = threading.Lock()
-        self.self_hash = self._hash_self()
-        self.running = True
+        self.targets={}
+        self.timeline=[]
+        self.lock=threading.Lock()
+        self.started=datetime.now(timezone.utc)
 
-    def _hash_self(self):
-        try:
-            return hashlib.sha256(inspect.getsource(sys.modules[__name__]).encode()).hexdigest()
-        except:
-            return None
+    def _init(self,t):
+        if t not in self.targets:
+            self.targets[t]={
+                "score":0,
+                "flags":0,
+                "hits":collections.Counter(),
+                "categories":set(),
+                "events":[],
+                "level":"CLEAN"
+            }
 
-    def add(self, target, cat, score, reason):
-        e = {
-            "time": now(),
-            "target": target,
-            "category": cat,
-            "score": score,
-            "reason": reason
-        }
+    def add(self,target,cat,reason,score):
         with self.lock:
-            self.events[target].append(e)
-            self.timeline.append(e)
+            self._init(target)
+            tgt=self.targets[target]
+            tgt["hits"][cat]+=1
+            key=(cat,reason)
+            if key not in {(e["category"],e["reason"]) for e in tgt["events"]}:
+                evt={
+                    "time":datetime.now(timezone.utc).isoformat(),
+                    "category":cat,
+                    "reason":reason,
+                    "score":score
+                }
+                tgt["events"].append(evt)
+                self.timeline.append({"target":target,**evt})
+                tgt["categories"].add(cat)
+            tgt["score"]+=score
+            tgt["flags"]+=1
+            tgt["level"]=risk_level(tgt["score"])
 
-    # ================= SYSTEM =================
-    def system_info(self):
-        Log.phase("Raccolta informazioni sistema")
-        self.system = {
-            "os": platform.platform(),
-            "cpu": platform.processor(),
-            "ram_gb": round(psutil.virtual_memory().total/1024**3,2),
-            "boot": datetime.fromtimestamp(psutil.boot_time()).isoformat()
-        }
-        Log.ok("Sistema analizzato")
-
-    # ================= PROCESS =================
+    # ---------------- PROCESS ----------------
     def process_scan(self):
-        Log.phase("Analisi processi")
-        for p in psutil.process_iter(["name","exe","cmdline","ppid"]):
-            try:
-                name = (p.info["name"] or "").lower()
-                cmd = " ".join(p.info["cmdline"] or []).lower()
-
-                if "java" in name:
-                    for f in CFG.JVM_FLAGS:
-                        if f in cmd:
-                            self.add(name,"JVM_TAMPER",180,f"Flag JVM sospetto: {f}")
-
-                if p.info["exe"] and p.info["exe"].lower().endswith(".exe"):
-                    if not is_valid_exe(p.info["exe"]):
-                        self.add(p.info["exe"],"FAKE_EXE",250,"EXE non valido")
-
-            except:
-                continue
-        Log.ok("Processi completati")
-
-    # ================= JAR =================
-    def inspect_jar(self, path):
-        try:
-            with zipfile.ZipFile(path) as jar:
-                names = " ".join(jar.namelist()).lower()
-                for cheat, sigs in CFG.CHEAT_SIGNATURES.items():
-                    hits = sum(1 for s in sigs if s in names)
-                    if hits >= 2:
-                        self.add(path,"CHEAT_CONFIRMED",320,f"{cheat} ({hits} firme)")
+        section("Process & JVM Scan")
+        try: import psutil
         except:
-            pass
+            err("Dipendenza mancante: psutil"); return
 
-    # ================= FILESYSTEM =================
-    def scan_dir(self, base):
-        if not base or not os.path.exists(base): return
-        for root,_,files in os.walk(base):
-            for f in files:
-                path = os.path.join(root,f)
-                ext = os.path.splitext(path)[1].lower()
+        for p in psutil.process_iter(["name","exe","cmdline"]):
+            try:
+                name=(p.info.get("name") or "").lower()
+                exe=p.info.get("exe") or "unknown"
+                cmd=" ".join(p.info.get("cmdline") or []).lower()
 
-                if ext in CFG.SAFE_EXT:
-                    continue
+                # JVM args sospetti
+                if "java" in name and any(x in cmd for x in ("-javaagent","-xbootclasspath","-agentlib")):
+                    self.add(exe,"JVM_ARG","Parametro JVM non standard",120)
 
-                if ext in CFG.EXEC_EXT:
-                    if recent(path):
-                        self.add(path,"RECENT_EXEC",40,"File recente")
+                # Keyword intelligence
+                hay=(name+" "+cmd)
+                for k in CFG.KEYWORDS:
+                    if k in hay:
+                        self.add(exe,"PROCESS_KEYWORD",f"Keyword: {k}",70)
+                        break
+            except: pass
 
-                    ent = entropy(path)
-                    if ent >= CFG.ENTROPY_HIGH:
-                        self.add(path,"HIGH_ENTROPY",90,f"Entropy {round(ent,2)}")
+        ok("Process scan completato"); wait()
 
-                    if any(h in path.lower() for h in CFG.MC_HINTS):
-                        self.add(path,"MC_CONTEXT",120,"Ambiente Minecraft")
+    # ---------------- FILESYSTEM ----------------
+    def scan_dir(self,base):
+        try:
+            for entry in os.scandir(base):
+                if entry.is_dir(follow_symlinks=False):
+                    self.scan_dir(entry.path)
+                else:
+                    ext=os.path.splitext(entry.name)[1].lower()
+                    if ext in CFG.SAFE_EXT: continue
 
-                    if ext == ".jar":
-                        self.inspect_jar(path)
+                    low=entry.name.lower()
+                    for k in CFG.KEYWORDS:
+                        if k in low:
+                            self.add(entry.path,"FILENAME_KEYWORD",f"Nome contiene '{k}'",60)
+                            break
+
+                    if ext in CFG.EXEC_EXT:
+                        # Hash verification
+                        h=sha256(entry.path)
+                        if h:
+                            if h in CFG.SAFE_HASHES:
+                                pass  # verificato
+                            else:
+                                self.add(entry.path,"HASH_UNKNOWN","Hash non verificato",80)
+
+                        self.add(entry.path,"EXECUTABLE","File eseguibile",25)
+                        if recent(entry.path):
+                            self.add(entry.path,"RECENT","File recente",40)
+                        if entropy(entry.path)>=CFG.ENTROPY_HIGH:
+                            self.add(entry.path,"ENTROPY","Entropy elevata",80)
+        except: pass
 
     def filesystem_scan(self):
-        Log.phase("Scansione filesystem")
-        with ThreadPoolExecutor(max_workers=CFG.THREADS) as exe:
+        section("Filesystem / Prefetch / Temp Scan")
+        with ThreadPoolExecutor(CFG.THREADS) as ex:
             for d in CFG.SCAN_DIRS:
-                exe.submit(self.scan_dir,d)
-        Log.ok("Filesystem completato")
+                if d and os.path.exists(d):
+                    ex.submit(self.scan_dir,d)
+        ok("Filesystem scan completato"); wait()
 
-    # ================= CORRELATION =================
-    def correlate(self):
-        Log.phase("Correlazione eventi")
-        results=[]
-        for t, evs in self.events.items():
-            score = sum(e["score"] for e in evs)
-            if score < 80:
-                continue
-            lvl = "CONFIRMED" if score >= CFG.SCORE_CONFIRMED else "SUSPICIOUS"
-            prob = min(99, int((score/400)*100))
-            results.append({
-                "target": t,
-                "livello": lvl,
-                "score": score,
-                "probabilita": f"{prob}%",
-                "eventi": evs
-            })
-        Log.ok(f"{len(results)} rilevamenti rilevanti")
-        return sorted(results,key=lambda x:x["score"],reverse=True)
+    # ---------------- MINECRAFT ----------------
+    def minecraft_scan(self):
+        section("Minecraft Scan")
+        mc=os.path.expanduser("~\\.minecraft")
+        if not os.path.exists(mc):
+            info("Cartella .minecraft non trovata"); return
+        for root,_,files in os.walk(mc):
+            for f in files:
+                low=f.lower()
+                if f.endswith(".jar") and any(k in low for k in CFG.KEYWORDS):
+                    self.add(os.path.join(root,f),"MC_MOD","Jar sospetto",100)
+        ok("Minecraft scan completato"); wait()
 
-    # ================= DISCORD =================
-    def send_discord(self, report):
-        Log.phase("Invio report Discord")
-        embed = {
-            "title":"🛡️ EDR 12.0 – Scansione completata",
-            "description":f"Scan ID `{CFG.SCAN_ID}`",
-            "color":15158332 if any(r["livello"]=="CONFIRMED" for r in report) else 3066993,
-            "fields":[
-                {"name":"Totale rilevamenti","value":str(len(report)),"inline":True},
-                {"name":"Confermati","value":str(sum(1 for r in report if r["livello"]=="CONFIRMED")),"inline":True}
-            ],
-            "footer":{"text":CFG.VERSION}
-        }
+    # ---------------- DISCORD ----------------
+    def send_discord(self):
+        if not DISCORD_WEBHOOK or "INSERISCI" in DISCORD_WEBHOOK:
+            warn("Webhook Discord non configurato"); return
+        try:
+            import requests
+            payload={
+                "meta":{
+                    "version":"3.0.0",
+                    "started":self.started.isoformat(),
+                    "ended":datetime.now(timezone.utc).isoformat()
+                },
+                "system":{
+                    "os":platform.platform(),
+                    "admin":is_admin()
+                },
+                "summary":{
+                    "targets":len(self.targets),
+                    "levels":collections.Counter(v["level"] for v in self.targets.values())
+                },
+                "targets":{
+                    k:{**v,"categories":list(v["categories"]),
+                       "hits":dict(v["hits"])}
+                    for k,v in self.targets.items()
+                },
+                "timeline":self.timeline
+            }
 
-        payload = {
-            "scan_id": CFG.SCAN_ID,
-            "system": self.system,
-            "results": report,
-            "timeline": self.timeline
-        }
+            requests.post(DISCORD_WEBHOOK,json={
+                "embeds":[{
+                    "title":"🛡️ SCREENSHARE – Audit Report",
+                    "description":"Report completo (verdetto non mostrato all’utente)",
+                    "color":5763719,
+                    "fields":[
+                        {"name":"Target analizzati","value":str(len(self.targets)),"inline":True},
+                        {"name":"Admin","value":str(is_admin()),"inline":True}
+                    ],
+                    "footer":{"text":"CoralMC • Staff Audit • v3.0"}
+                }]
+            },timeout=5)
 
-        requests.post(DISCORD_WEBHOOK, json={"embeds":[embed]})
-        requests.post(
-            DISCORD_WEBHOOK,
-            files={"file":(f"EDR_{CFG.SCAN_ID}.json", json.dumps(payload,indent=2))}
-        )
-        Log.ok("Report inviato")
+            requests.post(
+                DISCORD_WEBHOOK,
+                files={"file":("audit_report.json",
+                json.dumps(payload,indent=2,ensure_ascii=False))}
+            )
+            ok("Report inviato a Discord")
+        except:
+            warn("Invio Discord fallito")
 
-    # ================= RUN =================
+    # ---------------- RUN ----------------
     def run(self):
-        Log.phase("Avvio EDR")
-        self.system_info()
         self.process_scan()
         self.filesystem_scan()
-        report = self.correlate()
-        self.send_discord(report)
-        Log.ok("Scansione terminata")
+        self.minecraft_scan()
+        self.send_discord()
+        section("Completato")
+        info("Analisi terminata. Attendere indicazioni dello staff.")
 
 # ====================== MAIN ======================
-if __name__ == "__main__":
-    if platform.system() == "Windows":
-        EDR().run()
-    else:
-        print("Solo Windows")
+def main():
+    clear()
+    box("SCREENSHARE", "CoralMC • Staff Audit Tool v3.0")
+    sep()
+
+    missing=deps_check()
+    if missing:
+        warn(f"Dipendenze mancanti: {', '.join(missing)}")
+        warn("Installa le dipendenze e riavvia.")
+        return
+
+    print(f"{C.GRAY}Comandi: start | whoami | checkadmin | exit{C.RESET}")
+    sep()
+
+    ss=None
+    while True:
+        cmd=input("> ").strip().lower()
+        if cmd=="start":
+            ss=ScreenShare()
+            ss.run()
+        elif cmd=="whoami":
+            print(os.getlogin())
+        elif cmd=="checkadmin":
+            print("Admin" if is_admin() else "User")
+        elif cmd=="exit":
+            break
+        time.sleep(0.3)
+
+if __name__=="__main__":
+    if platform.system()!="Windows":
+        print("Solo Windows"); sys.exit(0)
+    main()
