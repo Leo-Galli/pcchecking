@@ -74,7 +74,7 @@ class UI:
 
     @staticmethod
     def header():
-        title_raw = f"                S C R E E N S H A R E  {VERSION}                "
+        title_raw = f"                S C R E E N S H A R E  -  {VERSION}                "
         subtitle_raw = "by LeoGalli - CoralMC"
         box_width = len(title_raw) + 4
         line = "━" * box_width
