@@ -12,7 +12,6 @@ import platform
 import ctypes
 import logging
 import re
-import gzip
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -308,69 +307,29 @@ class Scanner:
         self.engine.stats["Browsers"]["time"] = time.time() - s_t
         print()
 
-    def recycle_bin(self):
-        """Controlla file sospetti eliminati di recente nel Cestino."""
-        if OS_TYPE != "Windows": return
-        s_t = time.time()
-        try:
-            # Scansione profonda delle directory del Cestino di sistema
-            out = subprocess.check_output("dir /s /b C:\\$Recycle.Bin", shell=True, stderr=subprocess.DEVNULL).decode('cp850', errors='ignore').lower()
-            for kw in self.engine._flat_keys:
-                if kw in out:
-                    self.engine.add_finding("Recycle Bin", "Filesystem", f"File sospetto eliminato: {kw}", 140)
-        except: pass
-        UI.bar(1, 1, "RECYCLE BIN", self.engine.score)
-        self.engine.stats["RecycleBin"] = {"time": time.time() - s_t}
-        print()
-        
     def multi_account_minecraft(self):
         s_t = time.time()
-        mc_path = os.path.join(os.environ.get("APPDATA", ""), ".minecraft") if OS_TYPE == "Windows" else os.path.expanduser("~/.minecraft")
-        found_nicks = set()
-        
-        json_files = ["launcher_profiles.json", "launcher_accounts.json", "launcher_accounts_microsoft_store.json"]
-        for f_name in json_files:
-            f_path = os.path.join(mc_path, f_name)
-            if os.path.exists(f_path):
-                try:
-                    with open(f_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        data = f.read()
-                        names = re.findall(r'"name"\s*:\s*"([^"]+)"| "displayName"\s*:\s*"([^"]+)"', data)
-                        for match in names:
-                            for name in match:
-                                if name and len(name) > 2: found_nicks.add(name)
-                except: continue
-
-        log_dir = os.path.join(mc_path, "logs")
-        if os.path.exists(log_dir):
-            logs = [f for f in os.listdir(log_dir) if f.endswith(('.log', '.gz'))]
-            for i, log_f in enumerate(logs):
-                if i % 10 == 0: UI.bar(i+1, len(logs), "DEEP LOG SCAN", self.engine.score)
-                full_p = os.path.join(log_dir, log_f)
-                try:
-                    if log_f.endswith(".gz"):
-                        with gzip.open(full_p, 'rt', errors='ignore') as f: content = f.read()
-                    else:
-                        with open(full_p, 'r', errors='ignore') as f: content = f.read()
-                    matches = re.findall(r'Setting user: ([a-zA-Z0-9_]{3,16})', content)
-                    for n in matches: found_nicks.add(n)
-                except: continue
-
-        lunar = os.path.join(os.path.expanduser("~"), ".lunarclient", "settings", "game", "accounts.json")
-        if os.path.exists(lunar):
-            try:
-                with open(lunar, 'r') as f:
-                    data = json.load(f)
-                    for acc in data.get("accounts", []): found_nicks.add(acc.get("username"))
-            except: pass
-
-        if len(found_nicks) > 1:
-            self.engine.add_finding("Minecraft Forensic", "MultiAccount", f"Nicks: {', '.join(found_nicks)}", 150)
-        
+        paths = [os.path.join(os.environ.get("APPDATA", ""), ".minecraft")] if OS_TYPE == "Windows" else [os.path.expanduser("~/.minecraft")]
+        files_to_check = ["launcher_profiles.json", "launcher_accounts.json", "launcher_accounts_microsoft_store.json"]
+        found_accounts = []
+        for p in paths:
+            if not os.path.exists(p): continue
+            for f_name in files_to_check:
+                f_path = os.path.join(p, f_name)
+                if os.path.exists(f_path):
+                    try:
+                        with open(f_path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                            accs = data.get("accounts", {})
+                            for acc_id, acc_info in accs.items():
+                                name = acc_info.get("minecraftProfile", {}).get("name", "Unknown")
+                                found_accounts.append(name)
+                    except: continue
+        if len(set(found_accounts)) > 1:
+            self.engine.add_finding("Minecraft Launcher", "MultiAccount", f"Account: {', '.join(set(found_accounts))}", 60)
         UI.bar(1, 1, "MC ACCOUNTS", self.engine.score)
         self.engine.stats["MultiAccount"]["time"] = time.time() - s_t
         print()
-
 
 class Menu:
     def __init__(self, options):
@@ -427,7 +386,7 @@ def main():
         time.sleep(4); sys.exit()
 
     eng = Engine()
-    mlist = ["Processi", "Filesystem", "BAM Registry", "Prefetch Analysis", "DNS Cache", "Browser History", "Multi Account Minecraft", "Recycle Bin Scan"]
+    mlist = ["Processi", "Filesystem", "BAM Registry", "Prefetch Analysis", "DNS Cache", "Browser History", "Multi Account Minecraft"]
     menu = Menu(mlist)
 
     while True:
@@ -443,8 +402,7 @@ def main():
             "Prefetch Analysis": scn.prefetch,
             "DNS Cache": scn.dns_cache,
             "Browser History": scn.browsers,
-            "Multi Account Minecraft": scn.multi_account_minecraft,
-            "Recycle Bin Scan": scn.recycle_bin  # <--- Aggiungi questa riga
+            "Multi Account Minecraft": scn.multi_account_minecraft
         }
         
         st_t = time.time()
@@ -453,26 +411,9 @@ def main():
         dur = time.time() - st_t
 
         verdict = "PULITO" if eng.score < SCORE_PULITO else "SOSPETTO" if eng.score < SCORE_SOSPETTO else "CRITICO"
+        report_data = {"meta": {"score": eng.score, "verdict": verdict, "os": OS_TYPE, "duration": dur, "staffer": "LeoGalli"}, "findings": eng.findings}
         
-        # Estrae i nomi trovati dai findings per il report
-        # Cerca in tutti i findings se esiste una traccia di account
-        multi_acc_findings = [f['reason'].replace("Nicks: ", "") for f in eng.findings if "MultiAccount" in f['module']]
-        acc_list = multi_acc_findings[0] if multi_acc_findings else "Nessun Multi-Account rilevato"
-        
-        report_data = {
-            "meta": {
-                "score": eng.score, 
-                "verdict": verdict, 
-                "os": OS_TYPE, 
-                "duration": dur, 
-                "staffer": "LeoGalli",
-                "accounts_found": acc_list
-            }, 
-            "findings": eng.findings
-        }
-        
-        with open("screenshare_report.json", "w") as f: 
-            json.dump(report_data, f, indent=4)
+        with open("screenshare_report.json", "w") as f: json.dump(report_data, f, indent=4)
 
         try:
             col = 0x2ecc71 if verdict == "PULITO" else 0xf1c40f if verdict == "SOSPETTO" else 0xe74c3c
@@ -483,8 +424,7 @@ def main():
                     {"name": "Staffer", "value": "`LeoGalli`", "inline": True},
                     {"name": "Score", "value": f"`{eng.score}`", "inline": True},
                     {"name": "Durata", "value": f"`{dur:.2f}s`", "inline": True},
-                    {"name": "Account Rilevati", "value": f"```arm\n{acc_list}```", "inline": False},
-                    {"name": "Tracce Totali", "value": f"Trovate `{len(eng.findings)}` anomalie.", "inline": False}
+                    {"name": "Tracce", "value": f"Trovate `{len(eng.findings)}` anomalie.", "inline": False}
                 ],
                 "footer": {"text": "CoralMC Security - Titanium Forensic Engine"}
             }
